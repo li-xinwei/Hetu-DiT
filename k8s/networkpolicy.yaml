@@ -1,0 +1,71 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hetudit-head-ingress
+spec:
+  podSelector:
+    matchLabels:
+      ray.io/cluster: hetudit
+      ray.io/node-type: head
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ray.io/cluster: hetudit
+              ray.io/node-type: worker
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 10001
+    - from:
+        - podSelector:
+            matchLabels:
+              hetudit-access: "true"
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - podSelector:
+            matchLabels:
+              hetudit-admin: "true"
+      ports:
+        - protocol: TCP
+          port: 8265
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: hetudit
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 10001
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hetudit-head
+spec:
+  # Head is singleton. This blocks voluntary eviction until the PDB is removed
+  # or the workload is otherwise drained manually.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      ray.io/cluster: hetudit
+      ray.io/node-type: head

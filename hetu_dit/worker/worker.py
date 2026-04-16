@@ -152,6 +152,20 @@ def _load_serving_pipeline(engine_config: EngineConfig, model_class):
     raise ValueError(f"Unsupported model class: {model_class}")
 
 
+def _get_results_dir(engine_config: EngineConfig) -> str:
+    return os.path.abspath(engine_config.runtime_config.results_dir)
+
+
+def _ensure_results_dir(engine_config: EngineConfig) -> str:
+    results_dir = _get_results_dir(engine_config)
+    os.makedirs(results_dir, exist_ok=True)
+    return results_dir
+
+
+def _build_output_path(engine_config: EngineConfig, filename: str) -> str:
+    return os.path.join(_ensure_results_dir(engine_config), filename)
+
+
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -645,13 +659,17 @@ class Worker:
                 self.model.is_dp_last_group()
                 and "Model_Profiler" not in input_config.prompt
             ):
-                os.makedirs("results", exist_ok=True)
                 for i, image in enumerate(output.images):
                     resolution = f"{input_config.width}x{input_config.height}_{i}"
                     image_rank = dp_group_index * dp_batch_size + i
-                    image.save(f"results/stable_diffusion_3_result_{task_id}.png")
+                    output_filename = _build_output_path(
+                        engine_config, f"stable_diffusion_3_result_{task_id}.png"
+                    )
+                    image.save(output_filename)
                     logger.info(
-                        f"image {i} saved to ./results/stable_diffusion_3_result_{task_id}.png"
+                        "image %s saved to %s",
+                        i,
+                        output_filename,
                     )
 
                 t3 = global_profiler.timer()
@@ -678,9 +696,10 @@ class Worker:
                 f"pp{engine_config.parallel_config.pp_degree}_patch{engine_config.parallel_config.pp_degree}"
             )
             if is_dp_last_group() and "Model_Profiler" not in input_config.prompt:
-                os.makedirs("results", exist_ok=True)
                 resolution = f"{input_config.width}x{input_config.height}x{input_config.num_frames}"
-                output_filename = f"results/cogvideox_{task_id}.mp4"
+                output_filename = _build_output_path(
+                    engine_config, f"cogvideox_{task_id}.mp4"
+                )
                 export_to_video(output, output_filename, fps=8)
                 logger.info(f"output saved to {output_filename}")
 
@@ -719,12 +738,14 @@ class Worker:
                     self.model.is_dp_last_group()
                     and "Model_Profiler" not in input_config.prompt
                 ):
-                    os.makedirs("results", exist_ok=True)
                     for i, image in enumerate(output.images):
                         image_rank = dp_group_index * dp_batch_size + i
                         image_name = f"flux_result_{task_id}.png"
-                        image.save(f"results/{image_name}")
-                        logger.info(f"image {i} saved to ./results/{image_name}")
+                        output_filename = _build_output_path(
+                            engine_config, image_name
+                        )
+                        image.save(output_filename)
+                        logger.info("image %s saved to %s", i, output_filename)
                     t3 = global_profiler.timer()
                     results["store"] = t3
             elif input_config.output_type == "latent":
@@ -760,12 +781,16 @@ class Worker:
                     self.model.is_dp_last_group()
                     and "Model_Profiler" not in input_config.prompt
                 ):
-                    os.makedirs("results", exist_ok=True)
                     for i, image in enumerate(output.images):
                         image_rank = dp_group_index * dp_batch_size + i
-                        image.save(f"results/hunyuandit_result_{task_id}.png")
+                        output_filename = _build_output_path(
+                            engine_config, f"hunyuandit_result_{task_id}.png"
+                        )
+                        image.save(output_filename)
                         logger.info(
-                            f"image {i} saved to ./results/hunyuandit_result_{task_id}.png"
+                            "image %s saved to %s",
+                            i,
+                            output_filename,
                         )
                     t3 = global_profiler.timer()
                     results["store"] = t3
@@ -795,9 +820,10 @@ class Worker:
                 self.model.is_dp_last_group()
                 and "Model_Profiler" not in input_config.prompt
             ):
-                os.makedirs("results", exist_ok=True)
                 resolution = f"{input_config.width}x{input_config.height}x{input_config.num_frames}"
-                output_filename = f"results/hunyuan_video_{task_id}.mp4"
+                output_filename = _build_output_path(
+                    engine_config, f"hunyuan_video_{task_id}.mp4"
+                )
                 export_to_video(output, output_filename, fps=15)
                 logger.info(f"output saved to {output_filename}")
                 t3 = global_profiler.timer()
@@ -864,13 +890,17 @@ class Worker:
                 self.model.is_dp_last_group()
                 and "Model_Profiler" not in input_config.prompt
             ):
-                os.makedirs("results", exist_ok=True)
                 for i, image in enumerate(output.images):
                     resolution = f"{input_config.width}x{input_config.height}_{i}"
                     image_rank = dp_group_index * dp_batch_size + i
-                    image.save(f"results/stable_diffusion_3_result_{task_id}.png")
+                    output_filename = _build_output_path(
+                        engine_config, f"stable_diffusion_3_result_{task_id}.png"
+                    )
+                    image.save(output_filename)
                     logger.info(
-                        f"image {i} saved to ./results/stable_diffusion_3_result_{task_id}.png"
+                        "image %s saved to %s",
+                        i,
+                        output_filename,
                     )
             logger.debug("finished save")
 
@@ -893,9 +923,10 @@ class Worker:
                 f"pp{engine_config.parallel_config.pp_degree}_patch{engine_config.parallel_config.pp_degree}"
             )
             if is_dp_last_group() and "Model_Profiler" not in input_config.prompt:
-                os.makedirs("results", exist_ok=True)
                 resolution = f"{input_config.width}x{input_config.height}x{input_config.num_frames}"
-                output_filename = f"results/cogvideox_{task_id}.mp4"
+                output_filename = _build_output_path(
+                    engine_config, f"cogvideox_{task_id}.mp4"
+                )
                 export_to_video(output, output_filename, fps=8)
                 logger.info(f"output saved to {output_filename}")
 
@@ -929,12 +960,14 @@ class Worker:
                     self.model.is_dp_last_group()
                     and "Model_Profiler" not in input_config.prompt
                 ):
-                    os.makedirs("results", exist_ok=True)
                     for i, image in enumerate(output.images):
                         image_rank = dp_group_index * dp_batch_size + i
                         image_name = f"flux_result_{task_id}.png"
-                        image.save(f"results/{image_name}")
-                        logger.info(f"image {i} saved to ./results/{image_name}")
+                        output_filename = _build_output_path(
+                            engine_config, image_name
+                        )
+                        image.save(output_filename)
+                        logger.info("image %s saved to %s", i, output_filename)
 
         elif model_class == HunyuanDiTPipeline:
             output = self.model.decode_stage(
@@ -966,12 +999,16 @@ class Worker:
                     self.model.is_dp_last_group()
                     and "Model_Profiler" not in input_config.prompt
                 ):
-                    os.makedirs("results", exist_ok=True)
                     for i, image in enumerate(output.images):
                         image_rank = dp_group_index * dp_batch_size + i
-                        image.save(f"results/hunyuandit_result_{task_id}.png")
+                        output_filename = _build_output_path(
+                            engine_config, f"hunyuandit_result_{task_id}.png"
+                        )
+                        image.save(output_filename)
                         logger.info(
-                            f"image {i} saved to ./results/hunyuandit_result_{task_id}.png"
+                            "image %s saved to %s",
+                            i,
+                            output_filename,
                         )
 
         elif model_class == HunyuanVideoPipeline:
@@ -996,9 +1033,10 @@ class Worker:
                 self.model.is_dp_last_group()
                 and "Model_Profiler" not in input_config.prompt
             ):
-                os.makedirs("results", exist_ok=True)
                 resolution = f"{input_config.width}x{input_config.height}x{input_config.num_frames}"
-                output_filename = f"results/hunyuan_video_{task_id}.mp4"
+                output_filename = _build_output_path(
+                    engine_config, f"hunyuan_video_{task_id}.mp4"
+                )
                 export_to_video(output, output_filename, fps=15)
                 logger.info(f"output saved to {output_filename}")
 

@@ -89,6 +89,25 @@ pip install -e .
 - `--scheduler-strategy`: Pick the request queueing policy.
    - `random`: Follow a FIFO discipline.
    - `multi_machine_efficient_ilp`: Pair with the ILP search mode for high SLO attainment and consistent latency.
+- `--results_dir`: Directory used to store generated images or videos.
+- `--profile-cache-dir`: Directory used to persist profiler cache between restarts.
+- `--ray-address`: Address passed to `ray.init()` when the API server connects to an external Ray cluster.
+
+## Deployment
+
+- Module architecture: [`docs/module-architecture.md`](docs/module-architecture.md)
+- Kubernetes integration guide: [`docs/k8s-integration.md`](docs/k8s-integration.md)
+- Example Ray Operator manifests: [`k8s/`](k8s)
+
+The repository now includes:
+
+- A container image definition in [`Dockerfile`](Dockerfile)
+- KubeRay-based deployment manifests with PVC-backed model, results, and profile cache volumes
+- A sample Ingress manifest in [`k8s/ingress.example.yaml`](k8s/ingress.example.yaml)
+- Default `NetworkPolicy` and `PodDisruptionBudget` manifests for the Ray head pod
+- Additional API endpoints for deployment readiness and task status:
+  - `GET /readyz`
+  - `GET /status/{task_id}`
 
 ## Performance Overview
 

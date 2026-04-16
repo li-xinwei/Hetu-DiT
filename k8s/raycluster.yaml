@@ -1,0 +1,187 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: hetudit
+spec:
+  rayVersion: "2.39.0"
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "16"
+      num-gpus: "8"
+      metrics-export-port: "8080"
+    template:
+      spec:
+        restartPolicy: Never
+        securityContext:
+          fsGroup: 10001
+          runAsGroup: 10001
+          runAsNonRoot: true
+          runAsUser: 10001
+        containers:
+          - name: ray-head
+            image: hetudit:latest
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8080
+                name: metrics
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+            resources:
+              limits:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "8"
+              requests:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "8"
+            volumeMounts:
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+          - name: hetudit-api
+            image: hetudit:latest
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+            command:
+              - python3
+              - -m
+              - hetu_dit.entrypoint.api_server
+            args:
+              - --host=0.0.0.0
+              - --port=8000
+              - --ray-address=127.0.0.1:6379
+              - --stage_level
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+              - name: HETUDIT_MODEL_CLASS
+                value: sd3
+              - name: HETUDIT_MODEL
+                value: /models/stable-diffusion-3-medium-diffusers
+              - name: HETUDIT_RESULTS_DIR
+                value: /results
+              - name: HETUDIT_PROFILE_CACHE_DIR
+                value: /profile-cache
+              - name: HETUDIT_SEARCH_MODE
+                value: multi_machine_efficient_ilp
+              - name: HETUDIT_SCHEDULER_STRATEGY
+                value: multi_machine_efficient_ilp
+              - name: HETUDIT_MACHINE_NUMS
+                value: "1"
+            ports:
+              - containerPort: 8000
+                name: http
+            resources:
+              limits:
+                cpu: "4"
+                memory: 16Gi
+              requests:
+                cpu: "2"
+                memory: 8Gi
+            readinessProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 10
+            startupProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 10
+              failureThreshold: 60
+              periodSeconds: 10
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 20
+            volumeMounts:
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+        volumes:
+          - name: models
+            persistentVolumeClaim:
+              claimName: hetudit-models
+          - name: results
+            persistentVolumeClaim:
+              claimName: hetudit-results
+          - name: profile-cache
+            persistentVolumeClaim:
+              claimName: hetudit-profile-cache
+  workerGroupSpecs:
+    - groupName: gpu-workers
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 2
+      rayStartParams:
+        num-cpus: "16"
+        num-gpus: "8"
+        metrics-export-port: "8080"
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: ray-worker
+              image: hetudit:latest
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+              ports:
+                - containerPort: 8080
+                  name: metrics
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+              volumeMounts:
+                - name: models
+                  mountPath: /models
+                - name: results
+                  mountPath: /results
+                - name: profile-cache
+                  mountPath: /profile-cache
+          volumes:
+            - name: models
+              persistentVolumeClaim:
+                claimName: hetudit-models
+            - name: results
+              persistentVolumeClaim:
+                claimName: hetudit-results
+            - name: profile-cache
+              persistentVolumeClaim:
+                claimName: hetudit-profile-cache

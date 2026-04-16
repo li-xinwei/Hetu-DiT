@@ -80,7 +80,7 @@ class ServingEngine:
             executor._run_workers("execute_model")
 
     @classmethod
-    def from_engine_args(cls, serving_config: ServingConfig):
+    def from_engine_args(cls, serving_config: ServingConfig, ray_address=None):
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = serving_config.engine_config
@@ -88,7 +88,7 @@ class ServingEngine:
 
         # Initialize the cluster and specify the executor class.
         initialize_ray_cluster(
-            parallel_config
+            parallel_config, ray_address=ray_address
         )  # ray.init, and set the placement_group field in parallel_config
 
         executor_class = RayGPUExecutor

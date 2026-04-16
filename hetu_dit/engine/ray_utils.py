@@ -203,8 +203,10 @@ def initialize_ray_cluster(
             "Ray is not installed. Please install Ray to use distributed serving."
         )
 
+    address = ray_address or os.environ.get("RAY_ADDRESS")
+
     ray.init(
-        address=ray_address,
+        address=address,
         ignore_reinit_error=True,
         runtime_env={"env_vars": dict(os.environ)},
     )

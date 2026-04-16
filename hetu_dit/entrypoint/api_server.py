@@ -3,7 +3,7 @@ import ssl
 from typing import Any, Optional
 import time
 import torch
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 import uvicorn
 import asyncio
@@ -28,24 +28,35 @@ from hetu_dit.profiler import global_profiler
 from tqdm.asyncio import tqdm
 from hetu_dit.utils import create_new_config, make_profile_key
 
-from hetu_dit.entrypoint.utils import get_loopback_host
+from hetu_dit.entrypoint.utils import build_output_filename, get_bind_host
 
 logger = init_logger(__name__)
 TIMEOUT_KEEP_ALIVE = 10  # seconds.
 app = FastAPI()
 engine = None
+scheduler = None
 
 results_store = {}
 
 PROFILE_ON_STARTUP = False
 PROFILE_REPEAT_TIMES = 1
+STARTUP_COMPLETE = False
+STARTUP_ERROR = None
 
 
-def _update_result(task_id: str, *, status: str, output: Optional[str] = None) -> None:
+def _update_result(
+    task_id: str,
+    *,
+    status: str,
+    output: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
     results_store.setdefault(task_id, {})
     results_store[task_id]["status"] = status
     if output is not None:
         results_store[task_id]["output"] = output
+    if error is not None:
+        results_store[task_id]["error"] = error
 
 
 _parallel_strategy_cache = None
@@ -68,6 +79,44 @@ def _schedule_task(coro: Any, *, description: str) -> asyncio.Task:
     task = asyncio.create_task(coro)
     logger.debug("Scheduled %s; total tasks=%d", description, len(asyncio.all_tasks()))
     return task
+
+
+def _get_results_dir() -> str:
+    if engine is None:
+        return os.path.abspath(os.environ.get("HETUDIT_RESULTS_DIR", "results"))
+    return os.path.abspath(engine.engine_config.runtime_config.results_dir)
+
+
+def _predict_output_path(task_id: str, output_type: str = "pil") -> Optional[str]:
+    if engine is None:
+        return None
+    filename = build_output_filename(engine.model_class_name, task_id, output_type)
+    if filename is None:
+        return None
+    return os.path.join(_get_results_dir(), filename)
+
+
+async def _check_readiness() -> tuple[bool, dict]:
+    if engine is None or scheduler is None:
+        return False, {"ready": False, "reason": "engine_not_initialized"}
+    if not STARTUP_COMPLETE:
+        reason = "startup_in_progress" if STARTUP_ERROR is None else "startup_failed"
+        details = {"ready": False, "reason": reason}
+        if STARTUP_ERROR is not None:
+            details["error"] = STARTUP_ERROR
+        return False, details
+
+    try:
+        await engine.monitor.refresh()
+        worker_states = engine.detect_meta()
+        return True, {
+            "ready": True,
+            "workers": len(worker_states),
+            "results_dir": _get_results_dir(),
+        }
+    except Exception as exc:
+        logger.exception("Readiness check failed")
+        return False, {"ready": False, "reason": "ray_unhealthy", "error": str(exc)}
 
 
 def find_machine_ilde_num(
@@ -104,26 +153,33 @@ def find_machine_ilde_num(
 @app.on_event("startup")
 async def startup():
     logger.info("Server starting up...")
-    # init
-    global engine
-    await engine.init_all_executors()
-    await engine.init_monitor()
-    if PROFILE_ON_STARTUP:
-        logger.info("Startup profiling enabled (repeat=%d)", PROFILE_REPEAT_TIMES)
-        await profile_task(repeat_times=PROFILE_REPEAT_TIMES)
-    logger.info("Server initialization complete")
-    _schedule_task(process_queue(), description="process_queue")
-    if engine.search_mode == "fix":
-        scanner_task = _schedule_task(
-            engine._scan_worker_queues(), description="queue_scanner"
-        )
-        scanner_task.set_name("queue_scanner")
-    elif engine.search_mode == "greedy_ilp":
-        logger.info("enter greedy_ilp scan-request-queue")
-        scanner_task = _schedule_task(
-            engine._scan_request_queues(), description="queue_scanner"
-        )
-        scanner_task.set_name("queue_scanner")
+    global engine, STARTUP_COMPLETE, STARTUP_ERROR
+    STARTUP_COMPLETE = False
+    STARTUP_ERROR = None
+    try:
+        await engine.init_all_executors()
+        await engine.init_monitor()
+        if PROFILE_ON_STARTUP:
+            logger.info("Startup profiling enabled (repeat=%d)", PROFILE_REPEAT_TIMES)
+            await profile_task(repeat_times=PROFILE_REPEAT_TIMES)
+        logger.info("Server initialization complete")
+        _schedule_task(process_queue(), description="process_queue")
+        if engine.search_mode == "fix":
+            scanner_task = _schedule_task(
+                engine._scan_worker_queues(), description="queue_scanner"
+            )
+            scanner_task.set_name("queue_scanner")
+        elif engine.search_mode == "greedy_ilp":
+            logger.info("enter greedy_ilp scan-request-queue")
+            scanner_task = _schedule_task(
+                engine._scan_request_queues(), description="queue_scanner"
+            )
+            scanner_task.set_name("queue_scanner")
+        STARTUP_COMPLETE = True
+    except Exception as exc:
+        STARTUP_ERROR = str(exc)
+        logger.exception("Server startup failed")
+        raise
 
 
 async def process_queue():
@@ -132,6 +188,7 @@ async def process_queue():
     global engine
     if engine.search_mode == "random" or engine.search_mode == "greedy_ilp":
         while True:
+            task_id = None
             try:
                 """
                 if not scheduler._queue and processed:
@@ -169,11 +226,14 @@ async def process_queue():
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"[API Server] Error processing task: {e}")
+                if task_id is not None:
+                    _update_result(task_id, status="error", error=str(e))
                 traceback.print_exc()
                 await asyncio.sleep(0.1)
 
     elif engine.search_mode == "efficient_ilp":
         while True:
+            task_id = None
             try:
                 """
                 if not scheduler._queue and processed:
@@ -226,6 +286,8 @@ async def process_queue():
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"[API Server] Error processing task: {e}")
+                if task_id is not None:
+                    _update_result(task_id, status="error", error=str(e))
                 traceback.print_exc()
                 await asyncio.sleep(0.1)
 
@@ -234,6 +296,7 @@ async def process_queue():
         or engine.search_mode == "greedy_splitk"
     ):
         while True:
+            task_id = None
             try:
                 """
                 if not scheduler._queue and processed:
@@ -282,10 +345,13 @@ async def process_queue():
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"[API Server] Error processing task: {e}")
+                if task_id is not None:
+                    _update_result(task_id, status="error", error=str(e))
                 traceback.print_exc()
                 await asyncio.sleep(0.1)
     elif engine.search_mode == "fix":
         while True:
+            task_id = None
             try:
                 if not scheduler._queue and processed:
                     avg_latency = scheduler.get_average_latency()
@@ -332,6 +398,8 @@ async def process_queue():
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"[API Server] Error processing task: {e}")
+                if task_id is not None:
+                    _update_result(task_id, status="error", error=str(e))
                 await asyncio.sleep(0.1)
     else:
         raise ValueError(f"Invalid search mode: {engine.search_mode}")
@@ -346,6 +414,20 @@ async def root():
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
+
+
+@app.get("/readyz")
+async def readyz():
+    ready, details = await _check_readiness()
+    status_code = 200 if ready else 503
+    return JSONResponse(details, status_code=status_code)
+
+
+@app.get("/status/{task_id}")
+async def get_status(task_id: str):
+    if task_id not in results_store:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"task_id": task_id, **results_store[task_id]}
 
 
 def find_least_busy_machine(
@@ -575,9 +657,17 @@ async def generate_with_workers(request: Request):
     try:
         result = await future
         results_store[task_id] = result
-        return {"request_id": task_id, "status": "completed"}
+        output_path = _predict_output_path(task_id, input_config.output_type)
+        if output_path is not None:
+            results_store[task_id]["output"] = output_path
+        return {
+            "request_id": task_id,
+            "status": "completed",
+            "output": output_path,
+        }
     except Exception as e:
         logger.error(f"Error processing request {task_id}: {str(e)}")
+        results_store[task_id] = {"status": "error", "error": str(e)}
         return {"request_id": task_id, "status": "error", "message": str(e)}
 
 
@@ -697,7 +787,7 @@ async def generate_image(
         )
         logger.info("Request completed")
         future.set_result(result)
-    return "success"
+    return _predict_output_path(task_id, input_config.output_type)
 
 
 def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
@@ -722,6 +812,7 @@ def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
         use_torch_compile=args.use_torch_compile,
         use_onediff=args.use_onediff,
         adjust_strategy=args.adjust_strategy,
+        results_dir=args.results_dir,
         # machine id
         machine_num=args.machine_nums,
         use_disaggregated_encode_decode=args.use_disaggregated_encode_decode,
@@ -758,13 +849,18 @@ def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
         args.encode_worker_ids,
         args.decode_worker_ids,
         args.model_class,
+        args.ray_address,
     )
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--host", type=str, default=os.environ.get("HETUDIT_HOST", "0.0.0.0")
+    )
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("HETUDIT_PORT", "8000"))
+    )
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument(
@@ -779,28 +875,48 @@ def main():
     parser.add_argument(
         "--root-path",
         type=str,
-        default=None,
+        default=os.environ.get("HETUDIT_ROOT_PATH"),
         help="FastAPI root_path when app is behind a path based routing proxy",
+    )
+    parser.add_argument(
+        "--ray-address",
+        type=str,
+        default=os.environ.get("RAY_ADDRESS"),
+        help="Ray cluster address passed to ray.init(address=...).",
+    )
+    parser.add_argument(
+        "--profile-cache-dir",
+        type=str,
+        default=os.environ.get("HETUDIT_PROFILE_CACHE_DIR"),
+        help="Directory used by ModelProfiler to persist profile cache.",
     )
     # ========== for scheduler =========
     parser.add_argument(
         "--scheduler-strategy",
         type=str,
-        default="fifo",
+        default=os.environ.get("HETUDIT_SCHEDULER_STRATEGY", "fifo"),
         help="Scheduling strategy to use (priority, fifo, ilp_fix, or ilp_random)",
     )
     # ========== for scheduler =========
     # Add hetuDiTArgs for model class
-    parser.add_argument("--model-class", type=str, default="sd3")
+    parser.add_argument(
+        "--model-class",
+        type=str,
+        default=os.environ.get("HETUDIT_MODEL_CLASS", "sd3"),
+    )
 
     # Add hetuDiTArgs for search mode
-    parser.add_argument("--search-mode", type=str, default="random")
+    parser.add_argument(
+        "--search-mode",
+        type=str,
+        default=os.environ.get("HETUDIT_SEARCH_MODE", "random"),
+    )
 
     # Add hetuDiTArgs for multi machine serving
     parser.add_argument(
         "--machine_nums",
         type=int,
-        default=1,
+        default=int(os.environ.get("HETUDIT_MACHINE_NUMS", "1")),
         help="the number of machines in the cluster",
     )
     parser.add_argument(
@@ -856,6 +972,7 @@ def main():
     engine.model_profiler = ModelProfiler(
         model_name=engine.model_class_name,
         device=device_name,
+        cache_dir=args.profile_cache_dir,
     )
 
     # ========== init scheduler =========
@@ -871,7 +988,7 @@ def main():
     app.root_path = args.root_path
     uvicorn.run(
         app,
-        host=get_loopback_host(),
+        host=get_bind_host(args.host),
         port=args.port,
         log_level="debug",
         timeout_keep_alive=TIMEOUT_KEEP_ALIVE,

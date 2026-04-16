@@ -3,6 +3,7 @@ import argparse
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Union
+import os
 
 import torch
 import torch.distributed
@@ -67,6 +68,7 @@ class hetuDiTArgs:
     use_torch_compile: bool = False
     use_onediff: bool = False
     adjust_strategy: str = "cache"
+    results_dir: str = "results"
     # Parallel arguments
     # data parallel
     data_parallel_degree: int = 1
@@ -125,7 +127,10 @@ class hetuDiTArgs:
         model_group.add_argument(
             "--model",
             type=str,
-            default="/Path/to/your/models/stable-diffusion-3-medium-diffusers",
+            default=os.environ.get(
+                "HETUDIT_MODEL",
+                "/Path/to/your/models/stable-diffusion-3-medium-diffusers",
+            ),
             help="Name or path of the huggingface model to use.",
         )
         model_group.add_argument(
@@ -164,6 +169,12 @@ class hetuDiTArgs:
             default="cache",
             choices=["base", "cache", "p2p"],
             help="Execution strategy (base, cache, p2p). Default is cache.",
+        )
+        runtime_group.add_argument(
+            "--results_dir",
+            type=str,
+            default=os.environ.get("HETUDIT_RESULTS_DIR", "results"),
+            help="Directory used to store generated outputs.",
         )
 
         # Parallel arguments
@@ -344,6 +355,7 @@ class hetuDiTArgs:
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,
             adjust_strategy=self.adjust_strategy,
+            results_dir=self.results_dir,
             use_parallel_text_encoder=self.use_parallel_text_encoder,
         )
 

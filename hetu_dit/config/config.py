@@ -64,6 +64,7 @@ class RuntimeConfig:
     use_torch_compile: bool = False
     use_onediff: bool = False
     adjust_strategy: str = "cache"
+    results_dir: str = "results"
     # Text encoder parallel
     use_parallel_text_encoder: bool = False
 

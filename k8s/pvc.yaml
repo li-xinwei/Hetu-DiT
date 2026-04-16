@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hetudit-models
+spec:
+  accessModes:
+    - ReadWriteMany
+  # Replace with the RWX-capable StorageClass available in your cluster.
+  storageClassName: shared-rwx
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hetudit-results
+spec:
+  accessModes:
+    - ReadWriteMany
+  # Replace with the RWX-capable StorageClass available in your cluster.
+  storageClassName: shared-rwx
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hetudit-profile-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  # Replace with the RWX-capable StorageClass available in your cluster.
+  storageClassName: shared-rwx
+  resources:
+    requests:
+      storage: 20Gi

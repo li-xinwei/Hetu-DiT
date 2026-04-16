@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hetudit-api
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 32m
+spec:
+  ingressClassName: nginx
+  # tls:
+  #   - hosts:
+  #       - hetudit.example.com
+  #     secretName: hetudit-api-tls
+  rules:
+    - host: hetudit.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hetudit-api
+                port:
+                  number: 8000

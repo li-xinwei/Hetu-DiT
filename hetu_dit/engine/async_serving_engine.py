@@ -2477,13 +2477,14 @@ class AsyncServingEngine:
         encode_worker_ids=None,
         decode_worker_ids=None,
         model_class_name="",
+        ray_address=None,
     ):
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = serving_config.engine_config
         parallel_config = engine_config.parallel_config
         # Initialize the cluster and specify the executor class.
-        initialize_ray_cluster(parallel_config)
+        initialize_ray_cluster(parallel_config, ray_address=ray_address)
 
         executor_class = RayGPUExecutorAsync
 
