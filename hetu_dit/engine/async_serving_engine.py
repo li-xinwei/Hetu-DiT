@@ -2449,6 +2449,18 @@ class AsyncServingEngine:
         logger.debug(
             f"in static placement_init, machine_num = {self.engine_config.machine_num}"
         )
+        # Invariant: search_best_static_placement emits gpu_ids in
+        # range(machine_num * 8), so all_workers must have machine_num * 8
+        # entries. If this fails, the placement group was sized off a stale
+        # cluster_resources() snapshot before all worker pods joined Ray.
+        expected_workers = self.engine_config.machine_num * 8
+        if len(self.all_workers) != expected_workers:
+            raise RuntimeError(
+                f"Worker count mismatch: have {len(self.all_workers)} workers "
+                f"but machine_num={self.engine_config.machine_num} expects "
+                f"{expected_workers}. Placement group likely sized before all "
+                f"worker pods registered with Ray."
+            )
         instance_dict = self.search_best_static_placement(
             self.engine_config.machine_num
         )
@@ -2484,7 +2496,16 @@ class AsyncServingEngine:
         engine_config = serving_config.engine_config
         parallel_config = engine_config.parallel_config
         # Initialize the cluster and specify the executor class.
-        initialize_ray_cluster(parallel_config, ray_address=ray_address)
+        # GPUS_PER_MACHINE matches the hardcoded "8" in static_placement_init
+        # and post_init's machine_{i} grouping. Pass the explicit total so PG
+        # sizing doesn't race with multi-node worker registration.
+        GPUS_PER_MACHINE = 8
+        total_num_gpus = engine_config.machine_num * GPUS_PER_MACHINE
+        initialize_ray_cluster(
+            parallel_config,
+            ray_address=ray_address,
+            total_num_gpus=total_num_gpus,
+        )
 
         executor_class = RayGPUExecutorAsync
 

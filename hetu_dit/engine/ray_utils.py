@@ -185,6 +185,7 @@ except ImportError as e:
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
+    total_num_gpus: Optional[int] = None,
 ):
     """Initialize the distributed cluster with Ray.
 
@@ -234,18 +235,25 @@ def initialize_ray_cluster(
                 "available GPUs in the placement group."
             )
     else:
-        num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
-        if parallel_config.world_size > num_gpus_in_cluster:
+        # ray.cluster_resources() returns whatever GPUs Ray currently sees.
+        # On multi-node startup, worker pods may not have joined yet, so it
+        # under-reports → PG sized too small → downstream IndexError when
+        # static_placement_init indexes by machine_num*8. Multi-machine
+        # callers therefore pass total_num_gpus explicitly.
+        if total_num_gpus is None:
+            total_num_gpus = int(ray.cluster_resources().get("GPU", 0))
+        if total_num_gpus <= 0:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the cluster."
+                "No GPUs available for placement group. Either Ray hasn't "
+                "registered any GPU node yet, or total_num_gpus must be "
+                "passed explicitly."
             )
-        # Create a new placement group with 2 CPUs and 1 GPU per bundle
-        placement_group_specs = [{"GPU": 1, "CPU": 10}] * int(num_gpus_in_cluster)
+        # 1 GPU + 10 CPU per bundle. PACK strategy is implicit (default).
+        placement_group_specs = [{"GPU": 1, "CPU": 10}] * total_num_gpus
         current_placement_group = ray.util.placement_group(placement_group_specs)
-        # Wait until PG is ready - this will block until all
-        # requested resources are available, and will timeout
-        # if they cannot be provisioned.
+        # ready() blocks until all bundles are schedulable; on multi-node
+        # startup this is the implicit barrier that waits for worker pods
+        # to register with Ray. 30min headroom for image pulls + bootstrap.
         ray.get(current_placement_group.ready(), timeout=1800)
 
     # Set the placement group in the parallel config
