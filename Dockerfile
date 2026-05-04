@@ -1,27 +1,23 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+# hetudit — thin app image, layered on top of hetudit-base.
+#
+# Holds only the hetu_dit source tree and its editable install. All third-party
+# deps (pytorch, ray, transformers, flash-attn, ...) come from the base image.
+# Rebuild on every hetu_dit/ source change; see k8s/IMAGE_LAYERS.md.
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    HOME=/home/hetudit \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+ARG BASE_TAG=latest
+FROM hetudit-base:${BASE_TAG}
 
 WORKDIR /workspace/Hetu-DiT
 
-RUN groupadd --system --gid 10001 hetudit && \
-    useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/hetudit --shell /usr/sbin/nologin hetudit
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    git \
-    libgl1 \
-    libglib2.0-0 \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY --chown=10001:10001 . /workspace/Hetu-DiT
 
-RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install -e . && \
+# --no-deps: every dep already lives in the base image; if pip thinks
+# something is missing here, fix it by adding the dep to requirements-base.txt
+# and rebuilding the base image — never let it sneak into the app layer.
+# --no-build-isolation: the base image already has setuptools; without this
+# flag pip would spin up a clean venv and re-fetch setuptools from pypi,
+# which both wastes time and requires network egress for every app build.
+RUN python3 -m pip install -e . --no-deps --no-build-isolation && \
     mkdir -p /tmp/ray && \
     chown -R 10001:10001 /tmp/ray
 

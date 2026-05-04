@@ -1,0 +1,42 @@
+# Base-image dependency snapshot for hetudit-base.
+#
+# Mirrors setup.py:install_requires plus pins/extras learned from the K8s
+# build path. Kept as a separate file (not auto-derived from setup.py) so
+# that the base image can be rebuilt independently and pinned without
+# perturbing source-only `pip install -e .` workflows.
+#
+# Rebuild trigger: any change to setup.py:install_requires, any pin update
+# below, or a PyTorch base-image upgrade.
+#
+# Sync rule: when adding/removing a dep here, mirror the change in setup.py
+# (or vice-versa). See k8s/IMAGE_LAYERS.md for the operator workflow.
+
+# --- mirrors setup.py:install_requires ---
+torch>=2.1.0
+accelerate>=0.33.0
+diffusers>=0.31
+sentencepiece>=0.1.99
+beautifulsoup4>=4.12.3
+yunchang==0.3.5
+pytest
+flask
+opencv-python
+ray==2.39.0
+fastapi==0.110.0
+uvicorn==0.28.0
+aiohttp
+pulp
+nixl
+
+# --- pins discovered during K8s deploy debugging ---
+# transformers >=5 drops `transformers.generation.GenerationMixin` from the
+# t5 modeling import path; keep the floor from setup.py and add a ceiling.
+transformers>=4.39.1,<5
+
+# Ray 2.39 + click >= 8.2 raises `ValueError: Sentinel`.
+click<8.2
+
+# --- implicit deps used by hetu_dit/profiler at runtime, not in setup.py ---
+matplotlib
+scipy
+tqdm

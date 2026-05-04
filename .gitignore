@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# Prebuilt flash-attn wheel staged into the repo root for the base image
+# build (see scripts/build-base-image.sh). ABI-specific, multi-hundred-MB
+# binary; never commit.
+flash_attn-*.whl
+
 # Distribution / packaging
 .Python
 build/
