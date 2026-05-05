@@ -65,6 +65,11 @@ class RuntimeConfig:
     use_onediff: bool = False
     adjust_strategy: str = "cache"
     init_strategy: str = "default"
+    # D2-pre-warm-pool (PR1): when True, init_single_executor parks executors at L2
+    # state (CPU pipeline ready, GPU not yet loaded) and the dispatcher prefers
+    # warm executors with matching parallel config. Default off — strict no-op
+    # for the existing serving path. See plan: ~/.claude/plans/scalable-wibbling-whale.md
+    l2_pool_enabled: bool = False
     results_dir: str = "results"
     # Text encoder parallel
     use_parallel_text_encoder: bool = False

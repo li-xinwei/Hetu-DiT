@@ -360,8 +360,13 @@ class AsyncServingEngine:
             engine_config=executor.engine_config,
         )
         await task1
+        # D2 PR1: when l2_pool_enabled, park executors at L2 (CPU pipeline ready,
+        # GPU not yet loaded) instead of full init. Dispatcher triggers
+        # bind_to_instance on first request matching parallel config.
+        l2_enabled = executor.engine_config.runtime_config.l2_pool_enabled
+        target_method = "prepare_for_l2" if l2_enabled else "init_instance_model"
         task2 = await executor._run_workers_async(
-            "init_instance_model",
+            target_method,
             engine_config=executor.engine_config,
             model_class=self.model_class,
         )
@@ -1554,6 +1559,26 @@ class AsyncServingEngine:
                 executor.set_state("busy")
                 return executor
 
+            # D2 PR1: try warm L2 pool — executor with matching parallel config
+            # but parked at L2 (CPU pipeline ready, GPU not yet loaded).
+            if new_engine_config.runtime_config.l2_pool_enabled:
+                warm = self._find_warm_l2_executor(parallel_config_name)
+                if warm is not None:
+                    logger.info(
+                        "task_id=%s: warm L2 executor found for %s; upgrading to active via bind_to_instance",
+                        task_id,
+                        parallel_config_name,
+                    )
+                    bind_task = await warm._run_workers_async(
+                        "bind_to_instance",
+                        engine_config=new_engine_config,
+                        model_class=self.model_class,
+                    )
+                    await bind_task
+                    self.executor_states[warm] = "busy"
+                    warm.set_state("busy")
+                    return warm
+
             needed_workers = cal_needed_workers(new_engine_config)
             idle_workers = []
             for i, w in enumerate(self.all_workers):
@@ -2517,6 +2542,34 @@ class AsyncServingEngine:
         for exe in executors:
             state = exe.get_state()
             if state == "ready":
+                return exe
+        return None
+
+    def _find_warm_l2_executor(
+        self, parallel_config_name: str
+    ) -> Optional["RayGPUExecutorAsync"]:
+        """D2 PR1: find an executor with matching parallel config whose workers
+        are all parked at L2 (CPU pipeline ready, GPU not loaded).
+
+        Caller must already hold ``self._executor_condition`` (same context as
+        ``_find_ready_executor``). Returns None if no warm L2 executor exists
+        for this config; caller should then fall through to the legacy
+        idle-workers + switch_parallel_env path.
+        """
+        executors = self.executors_dict.get(parallel_config_name, [])
+        for exe in executors:
+            if not exe.workers:
+                continue
+            try:
+                states = ray.get([w.get_l2_state.remote() for w in exe.workers])
+            except Exception as exc:
+                logger.debug(
+                    "_find_warm_l2_executor: get_l2_state failed on %s: %s",
+                    exe,
+                    exc,
+                )
+                continue
+            if all(s == "l2" for s in states):
                 return exe
         return None
 

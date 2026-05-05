@@ -69,6 +69,7 @@ class hetuDiTArgs:
     use_onediff: bool = False
     adjust_strategy: str = "cache"
     init_strategy: str = "default"
+    l2_pool_enabled: bool = False
     results_dir: str = "results"
     # Parallel arguments
     # data parallel
@@ -187,6 +188,16 @@ class hetuDiTArgs:
                 "default: each worker independently moves singleton CPU model to its GPU (legacy). "
                 "nixl_broadcast: rank 0 fully loads CPU->GPU, then peers fetch via NIXL P2P. "
                 "nixl_pipelined: rank 0 loads in blocks and broadcasts each block as soon as ready."
+            ),
+        )
+        runtime_group.add_argument(
+            "--l2_pool_enabled",
+            action="store_true",
+            default=os.environ.get("HETUDIT_L2_POOL_ENABLED", "").lower() in ("1", "true", "yes"),
+            help=(
+                "Enable D2 PR1 L2 pre-warm pool: init_single_executor parks executors at L2 "
+                "state (CPU pipeline ready, GPU not loaded); dispatcher prefers warm executors "
+                "with matching parallel config. Default off."
             ),
         )
 
@@ -369,6 +380,7 @@ class hetuDiTArgs:
             use_onediff=self.use_onediff,
             adjust_strategy=self.adjust_strategy,
             init_strategy=self.init_strategy,
+            l2_pool_enabled=self.l2_pool_enabled,
             results_dir=self.results_dir,
             use_parallel_text_encoder=self.use_parallel_text_encoder,
         )

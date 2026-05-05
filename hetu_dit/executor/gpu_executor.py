@@ -134,16 +134,30 @@ class RayGPUExecutor(GPUExecutor):
                 f"At least one Worker is dead. Dead Workers: {dead_actors}. "
             )
 
-    def shutdown(self, prepare_for_reuse: bool = True):
+    def shutdown(self, prepare_for_reuse: bool = True, free_gpu_weights: bool = False):
         """
         Gracefully shuts down the executor without killing workers.
         Workers can optionally be prepared for reuse.
+
+        D2 PR1: when ``free_gpu_weights=True``, workers also call
+        ``unload_instance_model`` to release GPU memory back to the pool —
+        used when retiring an active executor to the L2 warm pool.
+        Default ``False`` preserves all existing call-site behavior.
         """
         if not self.workers:
             logger.info("No workers to shut down.")
             return
 
         logger.info("Dissolving executor and preparing workers for reuse...")
+        if free_gpu_weights:
+            try:
+                ray.get([w.unload_instance_model.remote() for w in self.workers])
+                logger.info(
+                    "shutdown: unloaded instance model on %d workers (free_gpu_weights=True)",
+                    len(self.workers),
+                )
+            except Exception as exc:
+                logger.error("shutdown: unload_instance_model failed: %s", exc)
         if prepare_for_reuse:
             for worker in self.workers:
                 try:

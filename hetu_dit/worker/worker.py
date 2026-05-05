@@ -199,6 +199,14 @@ class Worker:
         # `coldstart_mark_block_ready` RPC; peers `await ev.wait()` before
         # issuing NIXL pulls. Only populated when init_strategy != "default".
         self.coldstart_ready_events: Dict[int, asyncio.Event] = {}
+        # D2 PR1 L2 pre-warm: state machine for warm pool participation.
+        # "none"  = self.model not built (post-unload or fresh actor)
+        # "l2"    = self.model built on CPU but NOT on GPU (parked at L2)
+        # "active" = self.model on GPU, ready to serve requests
+        # Transitions: none→l2 via prepare_for_l2; l2→active via bind_to_instance;
+        # active→none via unload_instance_model. init_instance_model still
+        # works as the legacy combined entry (none→active in one shot).
+        self.l2_state: str = "none"
 
     def init_static_env(
         self, world_size: int, ranks: List[int] = [], engine_config: EngineConfig = None
@@ -432,17 +440,53 @@ class Worker:
                 f"Cache warm-up for {component_name} failed: {e}", exc_info=True
             )
 
-    async def init_instance_model(
+    async def prepare_for_l2(
         self, engine_config: EngineConfig = None, model_class=StableDiffusion3Pipeline
     ) -> None:
-        """
-        Used to init the small comm group in a assigned comm group
+        """Build the CPU pipeline wrapper without moving anything to GPU.
+
+        D2 PR1 entry point. After this returns, the worker is parked at L2
+        state — Ray actor + cuInit + NCCL groups + (optional) NIXL agent are
+        all initialized; ``self.model`` exists on CPU; GPU memory not yet
+        committed. A subsequent ``bind_to_instance`` call moves weights to GPU.
+
+        Idempotent: calling again rebuilds the wrapper. Calling on an active
+        worker is a no-op-with-warning (caller should ``unload_instance_model``
+        first).
         """
         engine_config = engine_config or self.engine_config
+        if self.l2_state == "active":
+            logger.warning(
+                "rank %s: prepare_for_l2 called while l2_state=active; "
+                "did caller forget to unload_instance_model first? Skipping.",
+                self.rank,
+            )
+            return
+        self.model = _load_serving_pipeline(engine_config, model_class)
+        self.l2_state = "l2"
+        logger.info("rank %s: parked at L2 (CPU pipeline ready)", self.rank)
+
+    async def bind_to_instance(
+        self, engine_config: EngineConfig = None, model_class=StableDiffusion3Pipeline
+    ) -> None:
+        """Move CPU pipeline weights to GPU (or fetch via NIXL).
+
+        D2 PR1 entry point. Pre-condition: ``l2_state == "l2"`` (i.e. caller
+        ran ``prepare_for_l2`` already). For backwards compat, if
+        ``l2_state == "none"`` we lazily run prepare_for_l2 first.
+        """
+        engine_config = engine_config or self.engine_config
+        if self.l2_state == "none":
+            await self.prepare_for_l2(engine_config, model_class)
+        elif self.l2_state == "active":
+            logger.info(
+                "rank %s: bind_to_instance called on already-active worker; no-op",
+                self.rank,
+            )
+            return
+
         init_strategy = engine_config.runtime_config.init_strategy
         cst_print("weight_load_start", rank=self.rank, strategy=init_strategy)
-        self.model = _load_serving_pipeline(engine_config, model_class)
-
         if init_strategy == "default":
             # Legacy path: each worker independently moves the singleton CPU
             # model to its GPU via PCIe — 16 ranks contend for the same CPU
@@ -460,6 +504,73 @@ class Worker:
             )
             logger.info("Model on GPU via init_strategy=%s.", init_strategy)
         cst_print("weight_load_done", rank=self.rank, strategy=init_strategy)
+        self.l2_state = "active"
+
+    async def init_instance_model(
+        self, engine_config: EngineConfig = None, model_class=StableDiffusion3Pipeline
+    ) -> None:
+        """Combined entry: prepare_for_l2 + bind_to_instance.
+
+        Kept for backward compat with callers that don't yet split the two
+        phases (init_single_executor when l2_pool_enabled=False).
+        """
+        engine_config = engine_config or self.engine_config
+        await self.prepare_for_l2(engine_config, model_class)
+        await self.bind_to_instance(engine_config, model_class)
+
+    def get_l2_state(self) -> str:
+        """RPC accessor: returns ``self.l2_state`` ∈ {"none","l2","active"}.
+
+        Used by the engine dispatcher's ``_find_warm_l2_executor`` to decide
+        whether an executor's workers are parked at L2 (eligible for warm-bind).
+        Sync method — no event-loop overhead.
+        """
+        return self.l2_state
+
+    async def unload_instance_model(self) -> None:
+        """Free GPU weights while keeping the actor alive.
+
+        D2 PR1 entry point. Pre-condition: ``l2_state == "active"``. After
+        this returns, ``self.model`` is gone, GPU memory is released, NIXL
+        block registrations are dropped, and ``l2_state`` is "none". The
+        worker can be re-prepared via ``prepare_for_l2`` for the next
+        instance binding.
+
+        NCCL communicator subgroups (created in lazy_init at startup) are
+        intentionally left intact — they are config-specific but cheap to
+        leave around as long as this worker stays bound to its spawn-time
+        engine_config.
+        """
+        if self.l2_state != "active":
+            logger.warning(
+                "rank %s: unload_instance_model called while l2_state=%s; ignoring",
+                self.rank,
+                self.l2_state,
+            )
+            return
+
+        nixl_manager = getattr(self, "nixl_manager", None)
+        if nixl_manager is not None:
+            for idx in list(nixl_manager.registered_blocks.keys()):
+                try:
+                    nixl_manager.deregister_block(idx)
+                except Exception as exc:
+                    logger.debug(
+                        "rank %s: failed to deregister NIXL block %s: %s",
+                        self.rank,
+                        idx,
+                        exc,
+                    )
+
+        self.model = None
+        torch.cuda.empty_cache()
+        self.l2_state = "none"
+        cst_print("instance_unloaded", rank=self.rank)
+        logger.info(
+            "rank %s: unload_instance_model done; allocated=%.1f GB",
+            self.rank,
+            torch.cuda.memory_allocated() / 1024**3,
+        )
 
     async def coldstart_mark_block_ready(self, idx: int, name: str) -> None:
         """RPC endpoint called by rank 0 to signal a peer that block ``idx``
