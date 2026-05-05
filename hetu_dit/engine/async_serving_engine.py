@@ -4,7 +4,7 @@ import os
 import time
 import traceback
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Type, Coroutine
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Coroutine
 
 import ray
 from diffusers import StableDiffusion3Pipeline
@@ -2433,6 +2433,30 @@ class AsyncServingEngine:
             # 3) Serialize handshake (add_remote_agent + make_connection)
             for r in ranks:
                 ray.get(worker_handles[r].init_nixl_peers.remote(all_meta))
+
+        # D2 PR2: capture per-worker role tag (HETUDIT_ROLE pod env var).
+        # `warm_worker_ids` is informational for now — PR3 will use it to
+        # bias placement-group selection. Logged here so deploy-time
+        # mistakes (warm group label missing, env var typo) surface early.
+        try:
+            roles = ray.get([w.get_role.remote() for w in self.all_workers])
+            self.warm_worker_ids: Set[int] = {
+                i for i, r in enumerate(roles) if r == "warm"
+            }
+            logger.info(
+                "D2 PR2: %d active worker(s), %d warm worker(s) detected: warm_ids=%s",
+                len(roles) - len(self.warm_worker_ids),
+                len(self.warm_worker_ids),
+                sorted(self.warm_worker_ids),
+            )
+        except Exception as exc:
+            # Backwards compat: deployments without get_role RPC (older
+            # Worker images) should not fail engine init.
+            logger.warning(
+                "D2 PR2: get_role RPC failed (%s); assuming all workers active",
+                exc,
+            )
+            self.warm_worker_ids = set()
 
     def add_request(self, request: Dict[str, Any]) -> None:
         pass

@@ -207,6 +207,19 @@ class Worker:
         # active→none via unload_instance_model. init_instance_model still
         # works as the legacy combined entry (none→active in one shot).
         self.l2_state: str = "none"
+        # D2 PR2 K8s role tag from pod env var ("warm" / "active"). Set by
+        # the gpu-workers-warm workerGroupSpec in k8s/raycluster.yaml. Engine
+        # uses this to prefer warm-pool workers when binding to a fresh
+        # instance. Defaults to "active" so existing single-group deployments
+        # behave identically.
+        self.role: str = os.environ.get("HETUDIT_ROLE", "active").lower()
+        if self.role not in ("active", "warm"):
+            logger.warning(
+                "rank %s: HETUDIT_ROLE=%r unrecognized, falling back to 'active'",
+                self.rank,
+                self.role,
+            )
+            self.role = "active"
 
     def init_static_env(
         self, world_size: int, ranks: List[int] = [], engine_config: EngineConfig = None
@@ -526,6 +539,16 @@ class Worker:
         Sync method — no event-loop overhead.
         """
         return self.l2_state
+
+    def get_role(self) -> str:
+        """RPC accessor: returns ``self.role`` ∈ {"active", "warm"}.
+
+        Set from the ``HETUDIT_ROLE`` pod env var at actor construction. The
+        engine partitions ``self.all_workers`` into active vs warm pools by
+        this value to bias placement-group selection toward warm pods first
+        when ``l2_pool_enabled=True``.
+        """
+        return self.role
 
     async def unload_instance_model(self) -> None:
         """Free GPU weights while keeping the actor alive.
