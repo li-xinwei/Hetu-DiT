@@ -62,10 +62,17 @@ def _enumerate_pipeline_blocks(model) -> List[Tuple[str, nn.Module]]:
     return blocks
 
 
-def _allocate_gpu_skeleton(model) -> None:
-    """Replace every CPU parameter / buffer on ``model`` with an empty CUDA
-    tensor of identical shape and dtype. Used by rank > 0 before NIXL fetch."""
-    for module in model.modules():
+def _allocate_gpu_skeleton(blocks) -> None:
+    """Replace every CPU parameter / buffer on each pipeline submodule with an
+    empty CUDA tensor of identical shape and dtype. Pipelines (StableDiffusion3Pipeline,
+    FluxPipeline, ...) aren't nn.Module — they don't expose ``.modules()`` —
+    so iterate over the enumerated nn.Module blocks instead."""
+    if hasattr(blocks, "modules"):
+        # called with a single nn.Module (legacy)
+        modules_iter = blocks.modules()
+    else:
+        modules_iter = (m for _, sub in blocks for m in sub.modules())
+    for module in modules_iter:
         for pname, p in list(module._parameters.items()):
             if p is None or p.is_cuda:
                 continue
@@ -122,7 +129,7 @@ async def _rank0_load_and_publish(worker, model, blocks, nixl_manager, init_stra
 async def _peer_skeleton_and_fetch(worker, model, blocks, nixl_manager, init_strategy: str) -> None:
     rank = worker.rank
     cst_print("skeleton_alloc_start", rank=rank)
-    _allocate_gpu_skeleton(model)
+    _allocate_gpu_skeleton(blocks)
     cst_print("skeleton_alloc_done", rank=rank)
 
     for idx, (name, mod) in enumerate(blocks):
@@ -178,7 +185,7 @@ async def _nixl_pull_block(worker, idx: int, name: str, mod: nn.Module, nixl_man
 
     reg_desc = agent.get_reg_descs(tensors)
     partial_md = agent.get_partial_agent_metadata(reg_desc, inc_conn_info=True)
-    remote_xfer_desc = agent.get_xfer_descs(dest_descs, mem_type="cuda", is_sorted=True)
+    remote_xfer_desc = agent.get_xfer_descs(dest_descs, mem_type="cuda")
     remote_xfer_desc_bytes = _pickle.dumps(remote_xfer_desc)
 
     rank0_handle = worker.all_worker_handles[0]

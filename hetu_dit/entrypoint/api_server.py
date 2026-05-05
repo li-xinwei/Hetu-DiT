@@ -829,6 +829,8 @@ def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
         use_torch_compile=args.use_torch_compile,
         use_onediff=args.use_onediff,
         adjust_strategy=args.adjust_strategy,
+        init_strategy=args.init_strategy,
+        l2_pool_enabled=args.l2_pool_enabled,
         results_dir=args.results_dir,
         # machine id
         machine_num=args.machine_nums,

@@ -2373,9 +2373,17 @@ class AsyncServingEngine:
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
+        # D2 PR2: prior pattern overrode CUDA_VISIBLE_DEVICES with all node GPUs
+        # so each actor saw 8 devices. But Ray pre-sets CUDA_VISIBLE_DEVICES=<1 GPU>
+        # when spawning a num_gpus=1 actor; torch.cuda lazy-init caches device_count=1
+        # before this override runs (e.g. during diffusers import). NCCL init then
+        # tries device index = world rank (0..15) and fails with "no GPUs found"
+        # whenever rank > 0. Skip the override and let each actor stay pinned to
+        # its single Ray-assigned GPU (device 0 inside the actor view); NCCL
+        # forms the world by rank, each rank using its own single device.
         # set_cuda_visible_devices(node_gpus[driver_node_id])
-        for worker, (node_id, _) in zip(self.all_workers, worker_node_and_gpu_ids):
-            worker.set_cuda_visible_devices.remote(node_gpus[node_id])
+        # for worker, (node_id, _) in zip(self.all_workers, worker_node_and_gpu_ids):
+        #     worker.set_cuda_visible_devices.remote(node_gpus[node_id])
 
         rank0_ip = ray.get(self.all_workers[0].get_node_ip.remote())
         rank0_port = ray.get(self.all_workers[0].get_node_open_port.remote())

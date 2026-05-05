@@ -635,7 +635,7 @@ class Worker:
             (t.data_ptr(), t.element_size() * t.numel(), t.device.index)
             for t in src_tensors
         ]
-        local_dlist = agent.get_xfer_descs(src_descs, mem_type="cuda", is_sorted=True)
+        local_dlist = agent.get_xfer_descs(src_descs, mem_type="cuda")
         remote_xfer_desc = pickle.loads(remote_xfer_desc_bytes)
 
         # Mirror rpc_nixl_send_data:2551-2585 — remove stale, add fresh, connect.
@@ -2289,7 +2289,7 @@ class Worker:
             )
         else:
             logger.info(
-                f"init_worker_distributed_environment's pid = {os.getpid()}, self.dist_init_method = {self.dist_init_method}, rank = {self.rank}, num_gpus = {num_gpus}"
+                f"init_worker_distributed_environment's pid = {os.getpid()}, self.dist_init_method = {self.dist_init_method}, rank = {self.rank}, num_gpus = {num_gpus}, CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'UNSET')}, torch.cuda.device_count()={torch.cuda.device_count()}, torch.cuda.is_available()={torch.cuda.is_available()}"
             )
             torch.distributed.init_process_group(
                 backend="nccl",
@@ -2904,7 +2904,11 @@ class Worker:
         """Create NIXL agent serially (called by the engine for each rank one by one)."""
         if getattr(self, "nixl_manager", None) is not None:
             return True
-        if self.engine_config.runtime_config.adjust_strategy != "p2p":
+        rc = self.engine_config.runtime_config
+        if rc.adjust_strategy != "p2p" and rc.init_strategy not in (
+            "nixl_broadcast",
+            "nixl_pipelined",
+        ):
             return True
         torch.cuda.synchronize()
         self.nixl_manager = NixlP2PManager(self.rank, self.all_worker_handles)

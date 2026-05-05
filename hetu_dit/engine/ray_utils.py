@@ -6,6 +6,7 @@ from hetu_dit.logger import init_logger
 
 import inspect
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from hetu_dit.utils import get_ip, get_open_port
 from hetu_dit.config.config import EngineConfig
@@ -137,6 +138,12 @@ try:
                 )
                 return False
 
+        def get_role(self) -> str:
+            return getattr(self.worker, "role", "active") if hasattr(self, "worker") else "active"
+
+        def get_l2_state(self) -> str:
+            return getattr(self.worker, "l2_state", "none") if hasattr(self, "worker") else "none"
+
         async def get_nixl_metadata(self) -> Tuple[int, bytes]:
             return await self.worker.get_nixl_metadata()
 
@@ -165,6 +172,21 @@ try:
 
         async def create_nixl_manager(self):
             return await self.worker.create_nixl_manager()
+
+        async def coldstart_mark_block_ready(self, idx, name):
+            return await self.worker.coldstart_mark_block_ready(idx, name)
+
+        async def coldstart_send_block(self, **kwargs):
+            return await self.worker.coldstart_send_block(**kwargs)
+
+        async def prepare_for_l2(self, *args, **kwargs):
+            return await self.worker.prepare_for_l2(*args, **kwargs)
+
+        async def bind_to_instance(self, *args, **kwargs):
+            return await self.worker.bind_to_instance(*args, **kwargs)
+
+        async def unload_instance_model(self, *args, **kwargs):
+            return await self.worker.unload_instance_model(*args, **kwargs)
 
         async def nixl_preflight_get_md(self):
             return await self.worker.nixl_preflight_get_md()
@@ -234,6 +256,20 @@ def initialize_ray_cluster(
                 "available GPUs in the placement group."
             )
     else:
+        # D2 PR2/PR3: when warm pool replicas > 0, head pod's ray.init runs
+        # before warm pod's wait-gcs-ready completes. cluster_resources only
+        # sees head pod's 8 GPUs. PG would then bind 8 actors all on head pod,
+        # leaving warm pod stranded as Ray-known-but-engine-invisible. Set
+        # HETUDIT_EXPECTED_GPUS=N to block until N GPUs have joined the cluster
+        # (typically num_pods * 8). 60s ceiling so deployments without warm
+        # pool degrade to current behaviour rather than hanging.
+        expected = int(os.environ.get("HETUDIT_EXPECTED_GPUS", "0") or "0")
+        deadline = time.time() + 60.0
+        while expected > 0 and time.time() < deadline:
+            available = ray.cluster_resources().get("GPU", 0)
+            if available >= expected:
+                break
+            time.sleep(2.0)
         num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
         if parallel_config.world_size > num_gpus_in_cluster:
             raise ValueError(
