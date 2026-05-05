@@ -28,7 +28,6 @@ HTTPS_PROXY="${HTTPS_PROXY//daim116/162.105.146.116}"
 NO_PROXY="${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,daim216,daim217,162.105.146.0/24}}"
 
 cd "$(dirname "$0")/.."
-REPO_ROOT="$(pwd)"
 
 if ! docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
     cat >&2 <<EOF

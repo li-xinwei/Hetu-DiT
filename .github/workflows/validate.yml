@@ -1,0 +1,60 @@
+name: validate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  manifests-and-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: YAML syntax check
+        # Belt-and-suspenders parser before kustomize tries anything.
+        run: |
+          python3 - <<'PY'
+          import sys, yaml, glob
+          bad = 0
+          for p in sorted(glob.glob("k8s/**/*.yaml", recursive=True) + glob.glob("k8s/**/*.yml", recursive=True)):
+              try:
+                  list(yaml.safe_load_all(open(p)))
+                  print(f"OK   {p}")
+              except Exception as exc:
+                  print(f"FAIL {p}: {exc}")
+                  bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Kustomize build (k8s/ overlay)
+        # kustomize is bundled with kubectl on ubuntu-latest. `kubectl
+        # kustomize` expands all bases / overlays and prints the resolved
+        # manifest — fails on missing files, bad references, or merge
+        # patch errors. CRD-level schema NOT checked (would need a live
+        # cluster); that's fine for client-side drift detection.
+        run: kubectl kustomize k8s/ > /tmp/kustomize-build.yaml && wc -l /tmp/kustomize-build.yaml
+
+      - name: Install hadolint
+        run: |
+          wget -qO /tmp/hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x /tmp/hadolint
+          /tmp/hadolint --version
+
+      - name: Hadolint Dockerfiles (lenient — known issues ignored)
+        # Keep the gate green to start. Tighten by removing --ignore flags
+        # in follow-up PRs after baseline issues are addressed.
+        # DL3008/DL3009: pin apt versions
+        # DL3013: pin pip versions
+        # DL3015: --no-install-recommends
+        # DL3042: --no-cache-dir on pip
+        # DL3018: pin apk versions (none used; defensive)
+        run: /tmp/hadolint --ignore DL3008 --ignore DL3009 --ignore DL3013 --ignore DL3015 --ignore DL3042 --ignore DL3018 Dockerfile Dockerfile.base
+
+      - name: Shellcheck bash scripts (severity=warning)
+        # shellcheck preinstalled on ubuntu-latest. Severity threshold lets
+        # current scripts (no `set -euo pipefail` etc.) pass while still
+        # catching real bugs.
+        run: shellcheck --severity=warning scripts/*.sh
