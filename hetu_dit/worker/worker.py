@@ -41,6 +41,7 @@ from hetu_dit.model_executor.utils.register_warpper import (
 from hetu_dit.profiler import global_profiler
 
 from hetu_dit.core.distributed.nixl_manager import NixlP2PManager
+from hetu_dit.cstrace import cst_print
 
 from hetu_dit.model_executor.diffusion_executor.layers.attention_processor import (
     hetuDiTAttentionWrapper,
@@ -193,6 +194,11 @@ class Worker:
         self.states = {}
         self.work_dir = (work_dir,)
         self.all_worker_handles = all_worker_handles or {}
+        # D1 cold-start: per-block ready events used by nixl_broadcast /
+        # nixl_pipelined init strategies. Rank 0 fills via
+        # `coldstart_mark_block_ready` RPC; peers `await ev.wait()` before
+        # issuing NIXL pulls. Only populated when init_strategy != "default".
+        self.coldstart_ready_events: Dict[int, asyncio.Event] = {}
 
     def init_static_env(
         self, world_size: int, ranks: List[int] = [], engine_config: EngineConfig = None
@@ -433,11 +439,107 @@ class Worker:
         Used to init the small comm group in a assigned comm group
         """
         engine_config = engine_config or self.engine_config
+        init_strategy = engine_config.runtime_config.init_strategy
+        cst_print("weight_load_start", rank=self.rank, strategy=init_strategy)
         self.model = _load_serving_pipeline(engine_config, model_class)
 
-        # move the model to GPU
-        self.model = self.model.to("cuda")
-        logger.info("Model moved to GPU.")
+        if init_strategy == "default":
+            # Legacy path: each worker independently moves the singleton CPU
+            # model to its GPU via PCIe — 16 ranks contend for the same CPU
+            # buffer's bandwidth. This is what 5-04 cold-start measurement
+            # benchmarked at ~20.7 s for 16-GPU SD3.
+            self.model = self.model.to("cuda")
+            logger.info("Model moved to GPU.")
+        else:
+            # D1 paths: rank 0 loads + broadcasts via NIXL P2P to peers.
+            from hetu_dit.worker.nixl_pipelined_loader import (
+                init_instance_model_via_nixl,
+            )
+            await init_instance_model_via_nixl(
+                self, model=self.model, init_strategy=init_strategy
+            )
+            logger.info("Model on GPU via init_strategy=%s.", init_strategy)
+        cst_print("weight_load_done", rank=self.rank, strategy=init_strategy)
+
+    async def coldstart_mark_block_ready(self, idx: int, name: str) -> None:
+        """RPC endpoint called by rank 0 to signal a peer that block ``idx``
+        (named ``name``) is loaded + NIXL-registered on rank 0 and ready to
+        be pulled. Peers wait on the corresponding event in
+        ``self.coldstart_ready_events`` before issuing NIXL fetches."""
+        ev = self.coldstart_ready_events.setdefault(idx, asyncio.Event())
+        ev.set()
+        logger.debug(
+            "rank %s: block %s (idx=%s) marked ready by rank 0",
+            self.rank,
+            name,
+            idx,
+        )
+
+    async def coldstart_send_block(
+        self,
+        block_idx: int,
+        remote_xfer_desc_bytes: bytes,
+        remote_partial_md,
+        receiver_rank: int,
+    ) -> None:
+        """RPC endpoint on rank 0: push registered block ``block_idx`` tensors
+        to ``receiver_rank``'s NIXL-registered destination buffers.
+
+        Pattern follows ``rpc_nixl_send_data`` (worker.py:2213) but skips the
+        cache / NeededPiece machinery — at cold start we have no cache, just
+        registered top-level submodule parameters in
+        ``self.nixl_manager.registered_blocks``.
+        """
+        agent = self.nixl_manager.agent
+        src_tensors = self.nixl_manager.registered_blocks.get(block_idx, [])
+        if not src_tensors:
+            raise RuntimeError(
+                f"rank {self.rank}: coldstart_send_block called for "
+                f"block_idx={block_idx} but no registered tensors found"
+            )
+        src_descs = [
+            (t.data_ptr(), t.element_size() * t.numel(), t.device.index)
+            for t in src_tensors
+        ]
+        local_dlist = agent.get_xfer_descs(src_descs, mem_type="cuda", is_sorted=True)
+        remote_xfer_desc = pickle.loads(remote_xfer_desc_bytes)
+
+        # Mirror rpc_nixl_send_data:2551-2585 — remove stale, add fresh, connect.
+        remote_agent_name_to_remove = f"agent_{receiver_rank}"
+        try:
+            agent.remove_remote_agent(remote_agent_name_to_remove)
+        except Exception:
+            pass
+        remote_agent_name = agent.add_remote_agent(remote_partial_md)
+        if isinstance(remote_agent_name, (bytes, bytearray)):
+            remote_agent_name = remote_agent_name.decode("utf-8", errors="ignore")
+        try:
+            agent.make_connection(remote_agent_name)
+        except Exception as ce:
+            logger.debug("rank %s: make_connection error: %s", self.rank, ce)
+
+        xfer_handle = agent.initialize_xfer(
+            "WRITE",
+            local_dlist,
+            remote_xfer_desc,
+            remote_agent_name,
+            backends=["UCX"],
+        )
+        state = agent.transfer(xfer_handle)
+        while state != "DONE":
+            if state == "ERR":
+                raise RuntimeError(
+                    f"rank {self.rank}: NIXL coldstart transfer of block "
+                    f"{block_idx} -> rank {receiver_rank} failed (state=ERR)"
+                )
+            await asyncio.sleep(0.001)
+            state = agent.check_xfer_state(xfer_handle)
+        logger.debug(
+            "rank %s: coldstart_send_block(block_idx=%s, recv=%s) DONE",
+            self.rank,
+            block_idx,
+            receiver_rank,
+        )
 
         if self.engine_config.runtime_config.adjust_strategy in ["cache", "p2p"]:
             # 1. Setup cache for the main Transformer

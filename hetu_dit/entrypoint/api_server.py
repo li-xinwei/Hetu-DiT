@@ -1,3 +1,12 @@
+# Cold-start trace marker — emitted before any heavy imports so the timestamp
+# accurately reflects Python process start. Helper module is imported below.
+import os as _cst_os
+import sys as _cst_sys
+import time as _cst_time
+
+if _cst_os.environ.get("HETU_COLDSTART_TRACE", "").lower() in ("1", "true", "yes", "on"):
+    print(f"[CSTRACE] {_cst_time.time():.6f} process_start", flush=True, file=_cst_sys.stdout)
+
 import argparse
 import ssl
 from typing import Any, Optional
@@ -29,6 +38,9 @@ from tqdm.asyncio import tqdm
 from hetu_dit.utils import create_new_config, make_profile_key
 
 from hetu_dit.entrypoint.utils import build_output_filename, get_bind_host
+from hetu_dit.cstrace import cst_print
+
+cst_print("imports_done")
 
 logger = init_logger(__name__)
 TIMEOUT_KEEP_ALIVE = 10  # seconds.
@@ -152,13 +164,17 @@ def find_machine_ilde_num(
 
 @app.on_event("startup")
 async def startup():
+    cst_print("startup_hook_entered")
     logger.info("Server starting up...")
     global engine, STARTUP_COMPLETE, STARTUP_ERROR
     STARTUP_COMPLETE = False
     STARTUP_ERROR = None
     try:
+        cst_print("init_executors_start")
         await engine.init_all_executors()
+        cst_print("init_executors_done")
         await engine.init_monitor()
+        cst_print("init_monitor_done")
         if PROFILE_ON_STARTUP:
             logger.info("Startup profiling enabled (repeat=%d)", PROFILE_REPEAT_TIMES)
             await profile_task(repeat_times=PROFILE_REPEAT_TIMES)
@@ -176,6 +192,7 @@ async def startup():
             )
             scanner_task.set_name("queue_scanner")
         STARTUP_COMPLETE = True
+        cst_print("startup_complete")
     except Exception as exc:
         STARTUP_ERROR = str(exc)
         logger.exception("Server startup failed")
@@ -958,8 +975,10 @@ def main():
 
     # Create engine
     global engine, PROFILE_ON_STARTUP, PROFILE_REPEAT_TIMES
+    cst_print("create_engine_start")
     engine = create_engine(args)
     engine.post_init()
+    cst_print("engine_created")
 
     PROFILE_ON_STARTUP = args.profile_on_startup
     PROFILE_REPEAT_TIMES = max(1, args.profile_repeat)
@@ -986,6 +1005,7 @@ def main():
 
     # Start server
     app.root_path = args.root_path
+    cst_print("uvicorn_start")
     uvicorn.run(
         app,
         host=get_bind_host(args.host),

@@ -2388,8 +2388,15 @@ class AsyncServingEngine:
             raise RuntimeError("Failed to set worker handles on one or more workers.")
         logger.info("Successfully distributed all worker handles to each worker.")
 
-        # Serialize NIXL initialization and handshake (p2p strategy only)
-        if self.engine_config.runtime_config.adjust_strategy == "p2p":
+        # Serialize NIXL initialization and handshake.
+        # Triggered by either adjust_strategy=p2p (in-engine cache adjust) or
+        # init_strategy in {nixl_broadcast, nixl_pipelined} (cold-start weight load).
+        runtime_cfg = self.engine_config.runtime_config
+        nixl_needed = (
+            runtime_cfg.adjust_strategy == "p2p"
+            or runtime_cfg.init_strategy in ("nixl_broadcast", "nixl_pipelined")
+        )
+        if nixl_needed:
             ranks = sorted(worker_handles.keys())
             # 1) Serialize agent creation to avoid UCX concurrent initialization segfault
             for r in ranks:
