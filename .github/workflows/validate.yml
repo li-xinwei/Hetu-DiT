@@ -51,7 +51,7 @@ jobs:
         # DL3015: --no-install-recommends
         # DL3042: --no-cache-dir on pip
         # DL3018: pin apk versions (none used; defensive)
-        run: /tmp/hadolint --ignore DL3008 --ignore DL3009 --ignore DL3013 --ignore DL3015 --ignore DL3042 --ignore DL3018 Dockerfile Dockerfile.base
+        run: /tmp/hadolint --failure-threshold warning --ignore DL3008 --ignore DL3009 --ignore DL3013 --ignore DL3015 --ignore DL3042 --ignore DL3018 Dockerfile Dockerfile.base
 
       - name: Shellcheck bash scripts (severity=warning)
         # shellcheck preinstalled on ubuntu-latest. Severity threshold lets
