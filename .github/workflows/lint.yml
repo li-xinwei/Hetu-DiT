@@ -22,17 +22,30 @@ jobs:
         run: pip install --upgrade pip ruff==0.6.9
 
       - name: Compile-all (syntax check)
-        # Catches syntax errors across the whole tree without importing
-        # anything (so missing torch / ray / nixl deps in CI environment
-        # do not block this gate).
         run: |
           python -m compileall -q hetu_dit scripts || (echo "compileall failed" && exit 1)
 
       - name: Ruff (correctness only)
-        # E9: syntax errors / IndentationError that compileall didn't flag
-        # F63: invalid is-comparison
-        # F7:  syntax errors in expressions
-        # (F82 undefined-name dropped — too noisy on existing vendored pipelines)
-        # Style/format checks are deliberately NOT enabled — we add those
-        # in Phase 2 once a tests/ dir exists and devs are CI-cycle aware.
+        # E9 / F63 / F7 — pure syntax / correctness. F82 dropped (noisy on vendored pipelines).
         run: ruff check --select=E9,F63,F7 hetu_dit scripts
+
+  pytest-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: syntax-and-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install pytest + pulp
+        # Both small (~6 MB total). torch / ray / diffusers deliberately NOT
+        # installed — Phase-2 unit tests use tests/conftest.py:load_module
+        # to bypass hetu_dit/__init__.py's eager diffusers import.
+        run: pip install --upgrade pip pytest==8.3.3 pulp
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
