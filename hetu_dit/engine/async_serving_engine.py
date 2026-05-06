@@ -1593,6 +1593,16 @@ class AsyncServingEngine:
             logger.debug(
                 f"task_id is {task_id}, in get_ready_executor_or_reconfigure, needed_workers is {needed_workers}, idle_workers is {idle_workers}"
             )
+            # PR3-lite: when l2_pool_enabled and warm pod exists, bias idle
+            # worker selection so the new executor binds to warm-tagged workers
+            # first. Their CPU model is already populated (prepare_for_l2 ran
+            # at boot) so bind_to_instance only does the GPU load step.
+            if (
+                new_engine_config.runtime_config.l2_pool_enabled
+                and getattr(self, "warm_worker_ids", None)
+            ):
+                warm_ids = self.warm_worker_ids
+                idle_workers.sort(key=lambda i: 0 if i in warm_ids else 1)
             if len(idle_workers) >= needed_workers:
                 # have enough idle workers
                 idle_workers = idle_workers[:needed_workers]
@@ -1623,6 +1633,19 @@ class AsyncServingEngine:
                 new_executor.set_state("busy")
 
                 self.executor_states[new_executor] = "busy"
+
+                # PR3-lite: when l2_pool_enabled the workers we just combined
+                # are at L2 (CPU pipeline ready, no GPU model). bind_to_instance
+                # promotes the slice to "active" — runs model.to("cuda") or
+                # NIXL streaming. Without this, hotspa_model / execute_model
+                # below operates on a CPU-only pipeline and crashes on .cuda().
+                if new_engine_config.runtime_config.l2_pool_enabled:
+                    bind_task = await new_executor._run_workers_async(
+                        "bind_to_instance",
+                        engine_config=new_executor.engine_config,
+                        model_class=self.model_class,
+                    )
+                    await bind_task
 
                 task2 = await new_executor._run_workers_async(
                     "hotspa_model", engine_config=new_executor.engine_config
@@ -1773,6 +1796,19 @@ class AsyncServingEngine:
                 new_executor.set_state("busy")
 
                 self.executor_states[new_executor] = "busy"
+
+                # PR3-lite: when l2_pool_enabled the workers we just combined
+                # are at L2 (CPU pipeline ready, no GPU model). bind_to_instance
+                # promotes the slice to "active" — runs model.to("cuda") or
+                # NIXL streaming. Without this, hotspa_model / execute_model
+                # below operates on a CPU-only pipeline and crashes on .cuda().
+                if new_engine_config.runtime_config.l2_pool_enabled:
+                    bind_task = await new_executor._run_workers_async(
+                        "bind_to_instance",
+                        engine_config=new_executor.engine_config,
+                        model_class=self.model_class,
+                    )
+                    await bind_task
 
                 task2 = await new_executor._run_workers_async(
                     "hotspa_model", engine_config=new_executor.engine_config
@@ -2588,7 +2624,21 @@ class AsyncServingEngine:
         for this config; caller should then fall through to the legacy
         idle-workers + switch_parallel_env path.
         """
+        # PR3-lite (RunPod migration): dispatch order is
+        #   1. executor whose workers are ALL warm-tagged + L2-parked (true
+        #      pre-warm pool hit — the warm pod was sitting at L2 waiting for
+        #      a request, no Ray/container/cuInit cost on the dispatch side)
+        #   2. any L2-parked executor (single-pod L2 mechanism — saves only the
+        #      GPU model load step, not the full cold-start)
+        # Both branches return the same executor type; caller calls
+        # bind_to_instance after _find_warm_l2_executor returns it.
         executors = self.executors_dict.get(parallel_config_name, [])
+
+        warm_ids = getattr(self, "warm_worker_ids", set()) or set()
+
+        candidates_warm: List["RayGPUExecutorAsync"] = []
+        candidates_any: List["RayGPUExecutorAsync"] = []
+
         for exe in executors:
             if not exe.workers:
                 continue
@@ -2601,8 +2651,30 @@ class AsyncServingEngine:
                     exc,
                 )
                 continue
-            if all(s == "l2" for s in states):
-                return exe
+            if not all(s == "l2" for s in states):
+                continue
+            exe_global_ranks = set(getattr(exe, "global_ranks", []) or [])
+            if exe_global_ranks and exe_global_ranks.issubset(warm_ids):
+                candidates_warm.append(exe)
+            else:
+                candidates_any.append(exe)
+
+        if candidates_warm:
+            chosen = candidates_warm[0]
+            logger.info(
+                "PR3-lite: dispatching to warm-pool executor %s (ranks=%s)",
+                getattr(chosen, "name", repr(chosen)),
+                getattr(chosen, "global_ranks", None),
+            )
+            return chosen
+        if candidates_any:
+            chosen = candidates_any[0]
+            logger.info(
+                "PR3-lite: dispatching to L2 executor (no warm tag) %s (ranks=%s)",
+                getattr(chosen, "name", repr(chosen)),
+                getattr(chosen, "global_ranks", None),
+            )
+            return chosen
         return None
 
     def _notify_executor_ready(self, parallel_config_name: str):
