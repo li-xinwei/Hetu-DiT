@@ -470,7 +470,9 @@ class Worker:
                 self.rank,
             )
             return
+        cst_print("prepare_for_l2_start", rank=self.rank)
         self.model = _load_serving_pipeline(engine_config, model_class)
+        cst_print("prepare_for_l2_done", rank=self.rank)
         self.l2_state = "l2"
         logger.info("rank %s: parked at L2 (CPU pipeline ready)", self.rank)
 
@@ -497,16 +499,15 @@ class Worker:
         # Each worker independently moves the singleton CPU model to its GPU
         # via PCIe. 5-04 PKU 4090 measurement: ~20.7s for 16-GPU SD3;
         # 2026-05-06 RunPod H100 SXM HBM3 measurement: ~2.7s for 4-GPU SD3
-        # (HBM3 bandwidth dominates). NIXL P2P streaming was prototyped here
-        # (commit 78fef8e, removed) but UCX cuda_ipc was rejected by the
-        # peer-discovery layer due to Ray actor CUDA_VISIBLE_DEVICES isolation
-        # — same-node peers couldn't import each others' IPC handles, falling
-        # back to tcp/eth0 at 83 MB/s (7x slower than baseline). See
-        # results/runpod-h100-2026-05-06/path3-* for the measurement record.
+        # (HBM3 bandwidth dominates).
+        cst_print("model_to_cuda_start", rank=self.rank)
         self.model = self.model.to("cuda")
+        cst_print("model_to_cuda_done", rank=self.rank)
         logger.info("Model moved to GPU.")
-        cst_print("weight_load_done", rank=self.rank, strategy="default")
+        cst_print("setup_caches_start", rank=self.rank)
         await self._setup_caches_after_bind()
+        cst_print("setup_caches_done", rank=self.rank)
+        cst_print("weight_load_done", rank=self.rank, strategy="default")
         self.l2_state = "active"
 
     async def init_instance_model(

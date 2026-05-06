@@ -488,6 +488,7 @@ async def generate(request: Request):
     """Generate image for the request."""
     request_dict = await request.json()
     logger.info("enter generate")
+    cst_print("generate_received", req_id=request_dict.get("req_id", "?"))
     req_id = request_dict.get("req_id", None)
     prompt = request_dict.get("prompt")
     negative_prompt = request_dict.get("negative_prompt", "")

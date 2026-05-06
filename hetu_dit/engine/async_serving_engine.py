@@ -19,6 +19,7 @@ from hetu_dit.config.config import (
 )
 from hetu_dit.core.request_manager.efficient_ilp import select_tasks
 from hetu_dit.core.request_manager.request_manager import RequestManager
+from hetu_dit.cstrace import cst_print
 from hetu_dit.executor.executor_base import ExecutorBase
 from hetu_dit.executor.gpu_executor import RayGPUExecutorAsync
 from hetu_dit.logger import init_logger
@@ -389,6 +390,7 @@ class AsyncServingEngine:
         task_id: str = None,
     ):
         try:
+            cst_print("execute_model_start", task_id=task_id)
             task1 = await executor._run_workers_async(
                 "execute_model",
                 engine_config=executor.engine_config,
@@ -397,6 +399,7 @@ class AsyncServingEngine:
                 task_id=task_id,
             )
             results = await task1
+            cst_print("execute_model_done", task_id=task_id)
             if "Model_Profiler" in input_config.prompt:
                 self.model_profiler.save_data(tag=task_id, results=results)
             else:
