@@ -495,15 +495,29 @@ class Worker:
             )
             return
 
-        cst_print("weight_load_start", rank=self.rank, strategy="default")
-        # Each worker independently moves the singleton CPU model to its GPU
-        # via PCIe. 5-04 PKU 4090 measurement: ~20.7s for 16-GPU SD3;
-        # 2026-05-06 RunPod H100 SXM HBM3 measurement: ~2.7s for 4-GPU SD3
-        # (HBM3 bandwidth dominates).
-        cst_print("model_to_cuda_start", rank=self.rank)
-        self.model = self.model.to("cuda")
+        # Two paths:
+        # - Legacy: per-tensor `model.to("cuda")`. ~2.34s on H100 SXM for SD3.
+        # - BPS (Bulk Pinned Staging): single bulk H2D via pinned slab.
+        #   Targets <=500ms by amortizing ~1000 cudaMemcpyAsync launches into 1.
+        #   See hetu_dit/worker/bulk_pinned_loader.py for the full mechanism.
+        # BPS is opt-in (runtime flag) and only validated for SD3 in this
+        # initial version.
+        use_bps = (
+            getattr(engine_config.runtime_config, "bulk_pinned_staging", False)
+            and model_class is StableDiffusion3Pipeline
+        )
+        strategy = "bps" if use_bps else "default"
+        cst_print("weight_load_start", rank=self.rank, strategy=strategy)
+        cst_print("model_to_cuda_start", rank=self.rank, mode=strategy)
+        if use_bps:
+            from hetu_dit.worker.bulk_pinned_loader import (
+                bulk_pinned_pipeline_to_cuda,
+            )
+            bulk_pinned_pipeline_to_cuda(self.model, "cuda", model_class)
+        else:
+            self.model = self.model.to("cuda")
         cst_print("model_to_cuda_done", rank=self.rank)
-        logger.info("Model moved to GPU.")
+        logger.info("Model moved to GPU (mode=%s).", strategy)
         cst_print("setup_caches_start", rank=self.rank)
         await self._setup_caches_after_bind()
         cst_print("setup_caches_done", rank=self.rank)

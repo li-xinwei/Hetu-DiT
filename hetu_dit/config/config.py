@@ -69,6 +69,11 @@ class RuntimeConfig:
     # warm executors with matching parallel config. Default off — strict no-op
     # for the existing serving path. See plan: ~/.claude/plans/scalable-wibbling-whale.md
     l2_pool_enabled: bool = False
+    # BPS (Bulk Pinned Staging): when True, Worker.bind_to_instance replaces
+    # the default per-tensor `model.to("cuda")` with a single bulk H2D copy
+    # via a pinned host slab. Targets ~5x faster bind on H100 SXM HBM3 by
+    # amortizing per-tensor cudaMemcpyAsync launch overhead. SD3 only.
+    bulk_pinned_staging: bool = False
     results_dir: str = "results"
     # Text encoder parallel
     use_parallel_text_encoder: bool = False
