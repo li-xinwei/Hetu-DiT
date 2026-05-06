@@ -173,12 +173,6 @@ try:
         async def create_nixl_manager(self):
             return await self.worker.create_nixl_manager()
 
-        async def coldstart_mark_block_ready(self, idx, name):
-            return await self.worker.coldstart_mark_block_ready(idx, name)
-
-        async def coldstart_send_block(self, **kwargs):
-            return await self.worker.coldstart_send_block(**kwargs)
-
         async def prepare_for_l2(self, *args, **kwargs):
             return await self.worker.prepare_for_l2(*args, **kwargs)
 

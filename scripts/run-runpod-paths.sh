@@ -2,11 +2,15 @@
 # Run cold-start path matrix on RunPod K3s (single 8-GPU node).
 #
 # Paths:
-#   path1-default          baseline, no D1, no L2
-#   path2-nixl_broadcast   D1 broadcast (rank 0 fully loads, peers fetch via NIXL)
-#   path3-nixl_pipelined   D1 pipelined (rank 0 streams blocks)
+#   path1-default          baseline, no L2
 #   path4-l2_only          --l2_pool_enabled, no warm pool
 #   path5-prewarm          --l2_pool_enabled + warm replicas=1 (PR3-lite dispatcher)
+#
+# (Paths path2-nixl_broadcast / path3-nixl_pipelined removed: D1 NIXL P2P
+# streaming was prototyped (commit 78fef8e -> reverted) but UCX cuda_ipc was
+# rejected by peer-discovery due to Ray actor CUDA_VISIBLE_DEVICES isolation;
+# fell back to tcp/eth0 at 83 MB/s, 7x slower than the default baseline. See
+# results/runpod-h100-2026-05-06/path3-* for the rejection record.)
 #
 # Each path:
 #   - kubectl apply RC variant (generated from /root/Hetu-DiT/k8s/raycluster-runpod.yaml)
@@ -21,7 +25,7 @@
 
 set -euo pipefail
 
-PATH_NAME="${1:?usage: $0 <path1-default|path2-nixl_broadcast|path3-nixl_pipelined|path4-l2_only|path5-prewarm>}"
+PATH_NAME="${1:?usage: $0 <path1-default|path4-l2_only|path5-prewarm>}"
 
 REPO=/root/Hetu-DiT
 TEMPLATE="${REPO}/k8s/raycluster-runpod.yaml"
@@ -42,10 +46,6 @@ api = find(rc["spec"]["headGroupSpec"], "hetudit-api")
 
 if name == "path1-default":
     pass  # template defaults
-elif name == "path2-nixl_broadcast":
-    api["args"].append("--init_strategy=nixl_broadcast")
-elif name == "path3-nixl_pipelined":
-    api["args"].append("--init_strategy=nixl_pipelined")
 elif name == "path4-l2_only":
     api["args"].append("--l2_pool_enabled")
 elif name == "path5-prewarm":
@@ -64,20 +64,6 @@ elif name == "path5-prewarm":
             wg["minReplicas"] = 1
 else:
     print(f"ERROR: unknown path {name}", file=sys.stderr); sys.exit(1)
-
-# UCX env so NIXL paths (2/3) actually use cuda_copy/cuda_ipc on NVLink
-if name in ("path2-nixl_broadcast", "path3-nixl_pipelined", "path5-prewarm"):
-    UCX_ENV = [
-        {"name": "UCX_TLS", "value": "cuda_copy,cuda_ipc,sm,tcp"},
-        {"name": "UCX_MEMTYPE_CACHE", "value": "n"},
-        {"name": "UCX_LOG_LEVEL", "value": "warn"},
-    ]
-    head_spec = rc["spec"]["headGroupSpec"]["template"]["spec"]
-    for c in head_spec["containers"]:
-        c.setdefault("env", []).extend(UCX_ENV)
-    for wg in rc["spec"]["workerGroupSpecs"]:
-        for c in wg["template"]["spec"]["containers"]:
-            c.setdefault("env", []).extend(UCX_ENV)
 
 pathlib.Path(dst).write_text(yaml.safe_dump(rc, sort_keys=False))
 print(f"wrote {dst}")

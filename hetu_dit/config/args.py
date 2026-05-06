@@ -68,7 +68,6 @@ class hetuDiTArgs:
     use_torch_compile: bool = False
     use_onediff: bool = False
     adjust_strategy: str = "cache"
-    init_strategy: str = "default"
     l2_pool_enabled: bool = False
     results_dir: str = "results"
     # Parallel arguments
@@ -177,18 +176,6 @@ class hetuDiTArgs:
             type=str,
             default=os.environ.get("HETUDIT_RESULTS_DIR", "results"),
             help="Directory used to store generated outputs.",
-        )
-        runtime_group.add_argument(
-            "--init_strategy",
-            type=str,
-            default="default",
-            choices=["default", "nixl_broadcast", "nixl_pipelined"],
-            help=(
-                "Cold-start weight load strategy. "
-                "default: each worker independently moves singleton CPU model to its GPU (legacy). "
-                "nixl_broadcast: rank 0 fully loads CPU->GPU, then peers fetch via NIXL P2P. "
-                "nixl_pipelined: rank 0 loads in blocks and broadcasts each block as soon as ready."
-            ),
         )
         runtime_group.add_argument(
             "--l2_pool_enabled",
@@ -379,7 +366,6 @@ class hetuDiTArgs:
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,
             adjust_strategy=self.adjust_strategy,
-            init_strategy=self.init_strategy,
             l2_pool_enabled=self.l2_pool_enabled,
             results_dir=self.results_dir,
             use_parallel_text_encoder=self.use_parallel_text_encoder,

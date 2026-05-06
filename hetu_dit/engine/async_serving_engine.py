@@ -2467,13 +2467,12 @@ class AsyncServingEngine:
         logger.info("Successfully distributed all worker handles to each worker.")
 
         # Serialize NIXL initialization and handshake.
-        # Triggered by either adjust_strategy=p2p (in-engine cache adjust) or
-        # init_strategy in {nixl_broadcast, nixl_pipelined} (cold-start weight load).
+        # Only triggered by adjust_strategy=p2p (in-engine cache adjust). The
+        # D1 cold-start NIXL path that also gated this was removed (commit
+        # 78fef8e -> reverted) — see results/runpod-h100-2026-05-06/path3-*
+        # for the measurement that justified the rollback.
         runtime_cfg = self.engine_config.runtime_config
-        nixl_needed = (
-            runtime_cfg.adjust_strategy == "p2p"
-            or runtime_cfg.init_strategy in ("nixl_broadcast", "nixl_pipelined")
-        )
+        nixl_needed = runtime_cfg.adjust_strategy == "p2p"
         if nixl_needed:
             ranks = sorted(worker_handles.keys())
             # 1) Serialize agent creation to avoid UCX concurrent initialization segfault

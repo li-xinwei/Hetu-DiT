@@ -64,7 +64,6 @@ class RuntimeConfig:
     use_torch_compile: bool = False
     use_onediff: bool = False
     adjust_strategy: str = "cache"
-    init_strategy: str = "default"
     # D2-pre-warm-pool (PR1): when True, init_single_executor parks executors at L2
     # state (CPU pipeline ready, GPU not yet loaded) and the dispatcher prefers
     # warm executors with matching parallel config. Default off — strict no-op
