@@ -69,7 +69,6 @@ class hetuDiTArgs:
     use_onediff: bool = False
     adjust_strategy: str = "cache"
     l2_pool_enabled: bool = False
-    bulk_pinned_staging: bool = False
     results_dir: str = "results"
     # Parallel arguments
     # data parallel
@@ -186,17 +185,6 @@ class hetuDiTArgs:
                 "Enable D2 PR1 L2 pre-warm pool: init_single_executor parks executors at L2 "
                 "state (CPU pipeline ready, GPU not loaded); dispatcher prefers warm executors "
                 "with matching parallel config. Default off."
-            ),
-        )
-        runtime_group.add_argument(
-            "--bulk_pinned_staging",
-            action="store_true",
-            default=os.environ.get("HETUDIT_BULK_PINNED_STAGING", "").lower() in ("1", "true", "yes"),
-            help=(
-                "Enable BPS (Bulk Pinned Staging) for Worker.bind_to_instance: "
-                "single bulk H2D copy via a pinned host slab in place of "
-                "per-tensor model.to('cuda'). Targets ~5x faster bind on H100 "
-                "SXM HBM3. SD3 only in this initial version. Default off."
             ),
         )
 
@@ -379,7 +367,6 @@ class hetuDiTArgs:
             use_onediff=self.use_onediff,
             adjust_strategy=self.adjust_strategy,
             l2_pool_enabled=self.l2_pool_enabled,
-            bulk_pinned_staging=self.bulk_pinned_staging,
             results_dir=self.results_dir,
             use_parallel_text_encoder=self.use_parallel_text_encoder,
         )
