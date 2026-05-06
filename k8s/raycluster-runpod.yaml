@@ -1,0 +1,301 @@
+# RunPod single-node 8-GPU RayCluster — bare-metal K3s, no dind.
+#
+# Differences from k8s/raycluster.yaml (PKU dind variant):
+#   - No fsGroup/runAsNonRoot — RunPod node runs as root and the
+#     hetudit:latest image's editable install lives under /workspace.
+#   - hostPath mounts point at /root paths (RunPod default $HOME).
+#   - dshm + ray-tmp emptyDir mounts retained (Ray IPC needs both).
+#   - Ray rayStartParams.num-cpus="100" so the placement group can pack
+#     8 actors (each requesting num_cpus=10) on the single node.
+#   - publishNotReadyAddresses=true on hetudit-head-svc — KubeRay creates
+#     this svc; warm worker pods need to reach GCS via the svc before
+#     the head pod's hetudit-api /readyz turns green (deadlock break).
+#     We patch in our smoke runner; not in this YAML directly.
+#   - HETUDIT_EXPECTED_GPUS env so the engine waits for warm-pod GPUs
+#     to register before the placement group binds.
+#
+# Generated per-path tweaks (init_strategy, l2_pool_enabled, warm
+# replicas) live in /tmp/rc-<path>.yaml on the RunPod node, derived
+# from this template by scripts/run-runpod-paths.sh.
+
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: hetudit
+spec:
+  rayVersion: "2.39.0"
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "100"
+      num-gpus: "8"
+      metrics-export-port: "8080"
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: ray-head
+            image: hetudit:latest
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8080
+                name: metrics
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+              - name: HETU_COLDSTART_TRACE
+                value: "1"
+            resources:
+              limits:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "8"
+              requests:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "8"
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: ray-tmp
+                mountPath: /tmp/ray
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+              - name: hetu-dit-dev
+                mountPath: /workspace/Hetu-DiT/hetu_dit
+          - name: hetudit-api
+            image: hetudit:latest
+            imagePullPolicy: IfNotPresent
+            command: ["python3", "-m", "hetu_dit.entrypoint.api_server"]
+            args:
+              - --host=0.0.0.0
+              - --port=8000
+              - --ray-address=127.0.0.1:6379
+              - --stage_level
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+              - name: HETU_COLDSTART_TRACE
+                value: "1"
+              - name: HETUDIT_MODEL_CLASS
+                value: sd3
+              - name: HETUDIT_MODEL
+                value: /models/stable-diffusion-3-medium-diffusers
+              - name: HETUDIT_RESULTS_DIR
+                value: /results
+              - name: HETUDIT_PROFILE_CACHE_DIR
+                value: /profile-cache
+              - name: HETUDIT_SEARCH_MODE
+                value: efficient_ilp
+              - name: HETUDIT_SCHEDULER_STRATEGY
+                value: efficient_ilp
+              - name: HETUDIT_MACHINE_NUMS
+                value: "1"
+              # Set to 16 (or more) for path 5 (warm pool); leave at 8 for paths 1-4.
+              - name: HETUDIT_EXPECTED_GPUS
+                value: "8"
+            ports:
+              - containerPort: 8000
+                name: http
+            resources:
+              limits:
+                cpu: "4"
+                memory: 16Gi
+              requests:
+                cpu: "2"
+                memory: 8Gi
+            readinessProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 10
+            startupProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 10
+              failureThreshold: 90
+              periodSeconds: 10
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 20
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: ray-tmp
+                mountPath: /tmp/ray
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+              - name: hetu-dit-dev
+                mountPath: /workspace/Hetu-DiT/hetu_dit
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          - name: ray-tmp
+            emptyDir: {}
+          - name: models
+            hostPath:
+              path: /root/models
+              type: DirectoryOrCreate
+          - name: results
+            hostPath:
+              path: /root/results
+              type: DirectoryOrCreate
+          - name: profile-cache
+            hostPath:
+              path: /root/profile-cache
+              type: DirectoryOrCreate
+          - name: hetu-dit-dev
+            hostPath:
+              path: /root/Hetu-DiT/hetu_dit
+              type: Directory
+  workerGroupSpecs:
+    # Generic gpu-workers group reserved for non-warm scale-out.
+    # Path 1-4 keep replicas=0; path 5 doesn't use this group either
+    # (warm group below carries the second instance).
+    - groupName: gpu-workers
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: "100"
+        num-gpus: "8"
+        metrics-export-port: "8080"
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: ray-worker
+              image: hetudit:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+                - name: HETU_COLDSTART_TRACE
+                  value: "1"
+              ports:
+                - containerPort: 8080
+                  name: metrics
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: models
+                  mountPath: /models
+                - name: results
+                  mountPath: /results
+                - name: hetu-dit-dev
+                  mountPath: /workspace/Hetu-DiT/hetu_dit
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
+            - name: models
+              hostPath:
+                path: /root/models
+                type: DirectoryOrCreate
+            - name: results
+              hostPath:
+                path: /root/results
+                type: DirectoryOrCreate
+            - name: hetu-dit-dev
+              hostPath:
+                path: /root/Hetu-DiT/hetu_dit
+                type: Directory
+    # D2 warm-pool group. Path 5 sets replicas=1 to bring a 4-GPU
+    # warm instance up alongside the head pod's 4-GPU active instance.
+    # Pod label hetudit-role=warm + env HETUDIT_ROLE=warm tag actors
+    # so the engine's PR2 detection (get_role) returns "warm" for them.
+    - groupName: gpu-workers-warm
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: "100"
+        num-gpus: "8"
+        metrics-export-port: "8080"
+      template:
+        metadata:
+          labels:
+            hetudit-role: warm
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: ray-worker
+              image: hetudit:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+                - name: HETUDIT_ROLE
+                  value: warm
+                - name: HETU_COLDSTART_TRACE
+                  value: "1"
+              ports:
+                - containerPort: 8080
+                  name: metrics
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "8"
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: models
+                  mountPath: /models
+                - name: results
+                  mountPath: /results
+                - name: hetu-dit-dev
+                  mountPath: /workspace/Hetu-DiT/hetu_dit
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
+            - name: models
+              hostPath:
+                path: /root/models
+                type: DirectoryOrCreate
+            - name: results
+              hostPath:
+                path: /root/results
+                type: DirectoryOrCreate
+            - name: hetu-dit-dev
+              hostPath:
+                path: /root/Hetu-DiT/hetu_dit
+                type: Directory
