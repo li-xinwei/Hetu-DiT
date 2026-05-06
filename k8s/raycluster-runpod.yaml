@@ -29,7 +29,7 @@ spec:
     rayStartParams:
       dashboard-host: "0.0.0.0"
       num-cpus: "100"
-      num-gpus: "8"
+      num-gpus: "4"
       metrics-export-port: "8080"
     template:
       spec:
@@ -56,11 +56,11 @@ spec:
               limits:
                 cpu: "16"
                 memory: 128Gi
-                nvidia.com/gpu: "8"
+                nvidia.com/gpu: "4"
               requests:
                 cpu: "16"
                 memory: 128Gi
-                nvidia.com/gpu: "8"
+                nvidia.com/gpu: "4"
             volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
@@ -102,9 +102,9 @@ spec:
                 value: efficient_ilp
               - name: HETUDIT_MACHINE_NUMS
                 value: "1"
-              # Set to 16 (or more) for path 5 (warm pool); leave at 8 for paths 1-4.
+              # 4-GPU H100 SXM single node (path 5 cannot run — needs 8 GPUs).
               - name: HETUDIT_EXPECTED_GPUS
-                value: "8"
+                value: "4"
             ports:
               - containerPort: 8000
                 name: http

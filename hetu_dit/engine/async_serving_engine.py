@@ -371,6 +371,15 @@ class AsyncServingEngine:
             model_class=self.model_class,
         )
         await task2
+        # PR3-lite: when l2_pool_enabled the executor is parked at L2 — its
+        # workers have CPU pipeline only, not GPU. Override the default
+        # executor_state="ready" (set in RayGPUExecutorAsync.__init__) so that
+        # _find_ready_executor doesn't dispatch requests here directly. The
+        # dispatcher's _find_warm_l2_executor will pick it up and call
+        # bind_to_instance to upgrade it to active before serving.
+        if l2_enabled:
+            executor.set_state("l2")
+            self.executor_states[executor] = "l2"
 
     async def run_single_executor(
         self,

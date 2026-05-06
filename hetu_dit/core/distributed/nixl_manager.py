@@ -45,9 +45,14 @@ class NixlP2PManager:
         """
         reg_desc_src = None
         try:
-            # 1. Register memory for this source
+            # 1. Register memory for this source. mem_type="cuda" is critical:
+            # without it NIXL registers tensors as host memory and UCX falls
+            # back to tcp/eth0 (~83 MB/s) instead of cuda_ipc over NVLink
+            # (~700 GB/s). Smoking gun: UCX_PROTO_INFO=y showed
+            # "multi-frag zero-copy | tcp/eth0" for 5GB transformer transfers
+            # taking 60s/block on H100 SXM with NV18 NVSwitch interconnect.
             if tensors_to_register:
-                reg_desc_src = self.agent.register_memory(tensors_to_register)
+                reg_desc_src = self.agent.register_memory(tensors_to_register, mem_type="cuda")
             else:
                 reg_desc_src = self.agent.get_reg_descs([])
 
@@ -139,7 +144,7 @@ class NixlP2PManager:
             return
 
         reg_desc = self.agent.get_reg_descs(tensors_to_reg)
-        self.agent.register_memory(reg_desc)
+        self.agent.register_memory(reg_desc, mem_type="cuda")
         self.registered_blocks[block_index] = tensors_to_reg
         logger.debug(
             f"Rank {self.rank}: Successfully registered memory for Block {block_index}."
