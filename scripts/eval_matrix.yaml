@@ -77,3 +77,21 @@ full:
   - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4}
   - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 2}
   - {pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2}
+
+lambda:
+  # Lambda Cloud gpu_4x_h100_sxm5 single-node K3s. 2 GPU head pod + 2 GPU
+  # warm pod = 4 GPU total, fits in single instance. Only warm ∈ {0, 1}
+  # because 2 GPU/pod × 2 pods saturates the node — warm=2/4 won't fit.
+  #
+  # 5-seed paper-grade rigor on stochastic patterns (burst/poisson/mixed);
+  # cold is deterministic so single seed sufficient. 32 total runs.
+  # Budget at $16.36/hr: ~85-180 min eval depending on per-cell overhead
+  # (apply_to_ready + workload + teardown), $25-50 total.
+  - {pattern: cold, head_size: 1, warm_replicas: 0, seeds: [0]}
+  - {pattern: cold, head_size: 1, warm_replicas: 1, seeds: [0]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: mixed, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: mixed, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
