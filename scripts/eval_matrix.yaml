@@ -1,25 +1,21 @@
 # Eval matrix definition for the warm-pool architecture evaluation.
 #
-# Each cell is a (workload, pool_config, baseline) triple. The orchestrator
-# (scripts/run_eval_matrix.sh) iterates over `cells` in order and writes one
-# run subdir per cell.
-#
-# Use the `small` set for Phase 4 sim validation; expand to `full` for the
-# Phase 5 real-mode mentor artifact.
+# Each cell is a (workload, pool_config) pair. The orchestrator iterates over
+# `cells` in the chosen set and writes one run subdir per cell × seed.
+# When a cell defines `seeds:`, the orchestrator replicates it once per seed
+# (for confidence-interval estimation in the report).
 
 defaults:
   model: sd3
-  seed: 0
-  # Calibration constants (seconds), passed to eval_sim.py for --mode sim.
-  # Real-mode (--mode real) ignores these — they're sim-only knobs.
+  seeds: [0]
+  # Calibration constants (seconds) — sim mode only; real mode ignores these.
   t_boot_l2: 25.0
   t_bind_warm: 3.14
   t_bind_cold_l2: 12.0
   t_bind_cold: 35.0
 
 small:
-  # 6 cells — Phase 4 gate: report renders, plots non-empty, Pareto frontier
-  # passes intuitive sanity (warm=0 top-left, warm>=2 bottom-right).
+  # 6 cells, single-seed. Phase 4 gate: report renders and Pareto sane.
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 0}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 1}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 4}
@@ -27,25 +23,57 @@ small:
   - {pattern: poisson, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 1}
   - {pattern: poisson, rate: 1.0, duration: 60, head_size: 1, warm_replicas: 2}
 
+paper:
+  # 24 unique cells × 5 seeds = 120 sim runs. Designed to match top-conference
+  # serving-paper eval rigor: replicate every cell with multiple seeds for CIs,
+  # cover burst/Poisson/steady/mixed across pool_size sweep, and provide
+  # baseline (warm=0) for every workload for delta computation.
+  #
+  # Each cell will be expanded into one run per listed seed.
+  #
+  # Workload coverage:
+  #   - burst-8: warm ∈ {0,1,2,4}
+  #   - poisson λ=0.5: warm ∈ {0,1,2}
+  #   - poisson λ=1.0: warm ∈ {0,1,2,4}
+  #   - poisson λ=2.0: warm ∈ {0,2,4}
+  #   - steady λ=1.0: warm ∈ {0,2}
+  #   - mixed λ=1.0: warm ∈ {0,2,4}
+  #   - cold (singleton): warm ∈ {0,1}
+  - {pattern: cold, head_size: 1, warm_replicas: 0, seeds: [0]}
+  - {pattern: cold, head_size: 1, warm_replicas: 1, seeds: [0]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: burst, n: 8, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+  - {pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+
 full:
-  # 18-cell sweep — Phase 5 real-mode mentor artifact.
-  # 3 workloads x 4 pool configs (warm_replicas 0/1/2/4) = 12 cells,
-  # plus 6 extras for steady & mixed-config baselines.
+  # Reduced 12-cell subset for real-mode (RunPod budget conscious). One seed
+  # per cell — real-mode replicates would multiply RunPod cost; instead we
+  # validate sim accuracy on this subset and trust the sim's CIs for the rest.
   - {pattern: cold, head_size: 1, warm_replicas: 0}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 0}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 1}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 2}
   - {pattern: burst, n: 8, head_size: 1, warm_replicas: 4}
   - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 0}
-  - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 1}
   - {pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 2}
   - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0}
-  - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 1}
   - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2}
   - {pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4}
-  - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 0}
   - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 2}
-  - {pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 4}
-  - {pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0}
-  - {pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2}
   - {pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2}

@@ -70,25 +70,46 @@ if [[ "$N_CELLS" -eq 0 ]]; then
 fi
 echo "  parsed $N_CELLS cells"
 
-# Helper: extract a single key from a {a: b, c: d} line. Returns "" if missing.
+# Helper: extract a single key from a {a: b, c: d, seeds: [0,1,2]} line.
+# Returns "" if missing. Lists are returned as comma-separated strings.
 extract_field() {
   local line="$1" key="$2"
   python3 - "$line" "$key" <<'PY'
-import sys, re, json
+import sys, re
 line, key = sys.argv[1], sys.argv[2]
-# Convert YAML inline mapping {a: b, c: d} into a JSON object (string-safe enough for our values).
 stripped = line.strip().lstrip("{").rstrip("}")
+# Split top-level commas (handling nested brackets for lists).
 pairs = {}
-for item in stripped.split(","):
+depth = 0
+buf = ""
+parts = []
+for ch in stripped:
+    if ch in "[{":
+        depth += 1
+    elif ch in "]}":
+        depth -= 1
+    if ch == "," and depth == 0:
+        parts.append(buf)
+        buf = ""
+    else:
+        buf += ch
+if buf:
+    parts.append(buf)
+for item in parts:
     if ":" not in item:
         continue
     k, _, v = item.partition(":")
-    pairs[k.strip()] = v.strip()
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        # list literal -> comma-joined string
+        v = v[1:-1].replace(" ", "")
+    pairs[k.strip()] = v
 print(pairs.get(key, ""))
 PY
 }
 
 CELL_IDX=0
+TOTAL_RUNS=0
 while IFS= read -r raw_line; do
   CELL_IDX=$((CELL_IDX + 1))
   pattern=$(extract_field "$raw_line" pattern)
@@ -97,48 +118,62 @@ while IFS= read -r raw_line; do
   duration=$(extract_field "$raw_line" duration)
   head_size=$(extract_field "$raw_line" head_size)
   warm_replicas=$(extract_field "$raw_line" warm_replicas)
+  seeds=$(extract_field "$raw_line" seeds)
 
   : "${head_size:=1}"
   : "${warm_replicas:=0}"
   : "${pattern:=cold}"
-
-  cell_id=$(printf "cell-%02d-%s-h%s-w%s" "$CELL_IDX" "$pattern" "$head_size" "$warm_replicas")
-  cell_dir="$OUT_DIR/$cell_id"
-  trace_file="$cell_dir/workload.trace"
-  mkdir -p "$cell_dir"
+  : "${seeds:=0}"
 
   echo ""
-  echo "[$CELL_IDX/$N_CELLS] $cell_id (pattern=$pattern head=$head_size warm=$warm_replicas)"
+  echo "[$CELL_IDX/$N_CELLS] pattern=$pattern head=$head_size warm=$warm_replicas seeds=$seeds"
 
-  # Workload generation arg assembly.
-  gen_args=(--pattern "$pattern" --seed 0 --model sd3 --out "$trace_file")
-  if [[ -n "$n" && "$pattern" == "burst" ]]; then gen_args+=(--n "$n"); fi
-  if [[ -n "$rate" ]]; then gen_args+=(--rate "$rate"); fi
-  if [[ -n "$duration" ]]; then gen_args+=(--duration "$duration"); fi
+  IFS=',' read -ra SEED_ARRAY <<< "$seeds"
+  for seed in "${SEED_ARRAY[@]}"; do
+    TOTAL_RUNS=$((TOTAL_RUNS + 1))
+    run_id=$(printf "cell-%02d-%s-h%s-w%s-s%s" "$CELL_IDX" "$pattern" "$head_size" "$warm_replicas" "$seed")
+    run_dir="$OUT_DIR/$run_id"
+    trace_file="$run_dir/workload.trace"
+    mkdir -p "$run_dir"
 
-  python3 scripts/workload_gen.py "${gen_args[@]}"
+    # Build a rich pattern tag so aggregator can distinguish e.g. poisson@λ=0.5
+    # from poisson@λ=1.0 when grouping cells. Tags become workload_pattern in
+    # summary.txt and aggregator groups by this exact string.
+    rich_pattern="$pattern"
+    if [[ -n "$rate" ]]; then rich_pattern="${rich_pattern}-r${rate}"; fi
+    if [[ -n "$n" && "$pattern" == "burst" ]]; then rich_pattern="${rich_pattern}-n${n}"; fi
 
-  # Run either simulator or real K8s lifecycle.
-  if [[ "$MODE" == "sim" ]]; then
-    python3 scripts/eval_sim.py \
-      --workload "$trace_file" \
-      --out "$cell_dir" \
-      --head-size "$head_size" \
-      --warm-replicas "$warm_replicas" \
-      --pattern "$pattern" \
-      --model sd3 \
-      --seed 0
-  else
-    bash scripts/runpod_drive_cell.sh \
-      --workload "$trace_file" \
-      --out "$cell_dir" \
-      --head-size "$head_size" \
-      --warm-replicas "$warm_replicas" \
-      --pattern "$pattern" \
-      --model sd3 \
-      --seed 0
-  fi
+    # Workload generation arg assembly.
+    gen_args=(--pattern "$pattern" --seed "$seed" --model sd3 --out "$trace_file")
+    if [[ -n "$n" && "$pattern" == "burst" ]]; then gen_args+=(--n "$n"); fi
+    if [[ -n "$rate" ]]; then gen_args+=(--rate "$rate"); fi
+    if [[ -n "$duration" ]]; then gen_args+=(--duration "$duration"); fi
+
+    python3 scripts/workload_gen.py "${gen_args[@]}" > "$run_dir/workload_gen.log" 2>&1
+
+    if [[ "$MODE" == "sim" ]]; then
+      python3 scripts/eval_sim.py \
+        --workload "$trace_file" \
+        --out "$run_dir" \
+        --head-size "$head_size" \
+        --warm-replicas "$warm_replicas" \
+        --pattern "$rich_pattern" \
+        --model sd3 \
+        --seed "$seed" > "$run_dir/sim.log" 2>&1
+    else
+      bash scripts/runpod_drive_cell.sh \
+        --workload "$trace_file" \
+        --out "$run_dir" \
+        --head-size "$head_size" \
+        --warm-replicas "$warm_replicas" \
+        --pattern "$rich_pattern" \
+        --model sd3 \
+        --seed "$seed"
+    fi
+  done
 done < "$CELLS_FILE"
+echo ""
+echo "total runs executed: $TOTAL_RUNS"
 
 echo ""
 echo "all cells done; aggregating..."
