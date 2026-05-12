@@ -1,0 +1,7 @@
+path:           path3-nixl_pipelined
+extra_arg:      --init_strategy=nixl_pipelined
+apply_to_ready: 212.28s
+end_to_end:     2.13s
+final_status:   completed
+cstrace_lines:  10
+outdir:         /root/results/path3-nixl_pipelined-030334

@@ -1,0 +1,7 @@
+path:           path4-l2_fixed
+extra_arg:      --l2_pool_enabled
+apply_to_ready: 21.97s
+end_to_end:     4.18s
+final_status:   completed
+cstrace_lines:  10
+outdir:         /root/results/path4-l2_fixed-032853

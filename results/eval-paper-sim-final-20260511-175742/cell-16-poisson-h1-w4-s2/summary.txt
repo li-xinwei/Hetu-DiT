@@ -1,0 +1,14 @@
+workload_pattern=poisson-r2.0
+pool_size=5
+head_size=1
+warm_replicas=4
+model=sd3
+n_requests_planned=228
+n_requests_served=228
+seed=2
+wall_clock_s=157.517
+t_boot_to_l2=11.0
+t_bind_warm=0.0
+t_bind_cold_l2=1.0
+t_bind_cold=1.0
+mode=sim

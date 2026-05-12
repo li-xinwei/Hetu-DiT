@@ -1,0 +1,231 @@
+# Lambda Cloud single-node 4-GPU RayCluster — bare-metal K3s.
+#
+# Topology: 1 Lambda VM (gpu_4x_h100_sxm5, 4× H100 SXM5 80GB) running K3s
+# + KubeRay. Head pod owns 2 GPUs (sp=2 cfg=1 active executor); warm pod
+# owns 2 GPUs (sp=2 cfg=1 L2-parked, role=warm). Eval cells flip warm
+# replicas 0 ↔ 1 to compare cold-start latency with vs. without pre-warm
+# pool. Total 2+2=4 GPUs fits in a single gpu_4x_h100_sxm5 node.
+#
+# Differences from k8s/raycluster-runpod.yaml:
+#   - image: ghcr.io/li-xinwei/hetudit:pku-2026-05-05 (public PKU build,
+#     pushed 2026-05-12 — avoids Lambda libstdc++ rebuild trap).
+#   - imagePullPolicy: IfNotPresent (Always only on first cell; pull
+#     timing must be excluded from cold-start measurement — pre-pull
+#     before kicking off any cell).
+#   - hostPath roots: /home/ubuntu/... (Lambda default non-root user)
+#   - hetu-dit-dev hostPath overlay REMOVED — we test the immutable
+#     GHCR image, no in-place hot-patch.
+#   - HETUDIT_EXPECTED_GPUS: "4" (matches head pod sp=4 allocation).
+#
+# Downgrade to gpu_4x_a100: set nvidia.com/gpu: "2" everywhere and
+#   HETUDIT_EXPECTED_GPUS: "2". sp=2 cfg=1.
+# Downgrade to gpu_2x_a100: nvidia.com/gpu: "1" and EXPECTED_GPUS: "1".
+
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: hetudit
+spec:
+  rayVersion: "2.39.0"
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "100"
+      num-gpus: "2"
+      metrics-export-port: "8080"
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: ray-head
+            image: ghcr.io/li-xinwei/hetudit:pku-2026-05-05
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8080
+                name: metrics
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+              - name: HETU_COLDSTART_TRACE
+                value: "1"
+            resources:
+              limits:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "2"
+              requests:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "2"
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: ray-tmp
+                mountPath: /tmp/ray
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+          - name: hetudit-api
+            image: ghcr.io/li-xinwei/hetudit:pku-2026-05-05
+            imagePullPolicy: IfNotPresent
+            command: ["python3", "-m", "hetu_dit.entrypoint.api_server"]
+            args:
+              - --host=0.0.0.0
+              - --port=8000
+              - --ray-address=127.0.0.1:6379
+              - --stage_level
+            env:
+              - name: LOG_LEVEL
+                value: INFO
+              - name: HETU_COLDSTART_TRACE
+                value: "1"
+              - name: HETUDIT_MODEL_CLASS
+                value: sd3
+              - name: HETUDIT_MODEL
+                value: /models/stable-diffusion-3-medium-diffusers
+              - name: HETUDIT_RESULTS_DIR
+                value: /results
+              - name: HETUDIT_PROFILE_CACHE_DIR
+                value: /profile-cache
+              - name: HETUDIT_SEARCH_MODE
+                value: efficient_ilp
+              - name: HETUDIT_SCHEDULER_STRATEGY
+                value: efficient_ilp
+              - name: HETUDIT_MACHINE_NUMS
+                value: "1"
+              # Head pod 2 GPUs + warm pod 2 GPUs = 4 total when warm
+              # replicas=1; the cell driver (scripts/runpod_drive_cell.sh,
+              # adapted) overrides this value based on actual warm_replicas
+              # at apply time via the python yaml-mutator.
+              - name: HETUDIT_EXPECTED_GPUS
+                value: "2"
+            ports:
+              - containerPort: 8000
+                name: http
+            resources:
+              limits:
+                cpu: "4"
+                memory: 16Gi
+              requests:
+                cpu: "2"
+                memory: 8Gi
+            readinessProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 10
+            startupProbe:
+              httpGet:
+                path: /readyz
+                port: 8000
+              initialDelaySeconds: 10
+              failureThreshold: 90
+              periodSeconds: 10
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 30
+              periodSeconds: 20
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: ray-tmp
+                mountPath: /tmp/ray
+              - name: models
+                mountPath: /models
+              - name: results
+                mountPath: /results
+              - name: profile-cache
+                mountPath: /profile-cache
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          - name: ray-tmp
+            emptyDir: {}
+          - name: models
+            hostPath:
+              path: /home/ubuntu/models
+              type: DirectoryOrCreate
+          - name: results
+            hostPath:
+              path: /home/ubuntu/results
+              type: DirectoryOrCreate
+          - name: profile-cache
+            hostPath:
+              path: /home/ubuntu/profile-cache
+              type: DirectoryOrCreate
+  workerGroupSpecs:
+    # Pre-warm pool group. Eval flips replicas 0↔1 to toggle warm pool.
+    # Pod label hetudit-role=warm + env HETUDIT_ROLE=warm tag actors
+    # so PR2 dispatch (get_role) returns "warm" for warm-tagged workers.
+    - groupName: gpu-workers-warm
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: "100"
+        num-gpus: "2"
+        metrics-export-port: "8080"
+      template:
+        metadata:
+          labels:
+            hetudit-role: warm
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: ray-worker
+              image: ghcr.io/li-xinwei/hetudit:pku-2026-05-05
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+                - name: HETUDIT_ROLE
+                  value: warm
+                - name: HETU_COLDSTART_TRACE
+                  value: "1"
+              ports:
+                - containerPort: 8080
+                  name: metrics
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "2"
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "2"
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: models
+                  mountPath: /models
+                - name: results
+                  mountPath: /results
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
+            - name: models
+              hostPath:
+                path: /home/ubuntu/models
+                type: DirectoryOrCreate
+            - name: results
+              hostPath:
+                path: /home/ubuntu/results
+                type: DirectoryOrCreate

@@ -1,0 +1,1 @@
+Request(request_id_local='req-000000', prompt='Detailed concept art of a steampunk airship hovering over Victorian London.', negative_prompt='', height=1024, width=1024, num_frames=0, num_inference_steps=20, timestamp=0.0)

@@ -1,0 +1,14 @@
+workload_pattern=steady-r1.0
+pool_size=1
+head_size=1
+warm_replicas=0
+model=sd3
+n_requests_planned=121
+n_requests_served=121
+seed=1
+wall_clock_s=400.410
+t_boot_to_l2=11.0
+t_bind_warm=0.0
+t_bind_cold_l2=1.0
+t_bind_cold=1.0
+mode=sim

@@ -1,0 +1,6 @@
+path:           path3-rndv_inf
+extra:          --init_strategy=nixl_pipelined
+UCX_RNDV_THRESH: inf
+ready_time:     182.34s
+e2e:            1.13s
+loads_lines:    48

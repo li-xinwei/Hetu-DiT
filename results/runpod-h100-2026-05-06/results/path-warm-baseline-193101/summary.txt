@@ -1,0 +1,4 @@
+path:           path-warm-baseline
+extra:          --l2_pool_enabled
+ready_time:     22.08s
+warm_hit_e2e:   4.26s

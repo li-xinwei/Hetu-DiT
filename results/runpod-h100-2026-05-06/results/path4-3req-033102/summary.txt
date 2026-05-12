@@ -1,0 +1,7 @@
+path:           path4-3req
+extra:          --l2_pool_enabled
+ready_time:     23.12s
+req1_e2e:       4.25s    <- expected: includes bind cost when l2_pool_enabled
+req2_e2e:       3.21s    <- expected: pure inference (active)
+req3_e2e:       3.21s    <- expected: same as req2
+weight_load_lines: 6

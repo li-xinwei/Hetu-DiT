@@ -1,0 +1,4 @@
+path:           path-warm-bps
+extra:          --l2_pool_enabled --bulk_pinned_staging
+ready_time:     22.07s
+warm_hit_e2e:   11.54s

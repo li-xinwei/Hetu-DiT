@@ -1,0 +1,7 @@
+path:       path-2inst-warm
+extra:      --l2_pool_enabled
+ready_time: 22.08s
+instances:  0
+0
+req1_e2e:   3.41s    <- bind instance A + inference
+req2_e2e:   6.59s    <- bind instance B (warm pool hit) + inference (concurrent)

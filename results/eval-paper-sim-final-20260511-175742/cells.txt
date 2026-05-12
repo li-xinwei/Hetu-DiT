@@ -1,0 +1,21 @@
+{pattern: cold, head_size: 1, warm_replicas: 0, seeds: [0]}
+{pattern: cold, head_size: 1, warm_replicas: 1, seeds: [0]}
+{pattern: burst, n: 8, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: burst, n: 8, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+{pattern: burst, n: 8, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: burst, n: 8, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 0.5, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 1, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: poisson, rate: 2.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}
+{pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: steady, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 0, seeds: [0, 1, 2, 3, 4]}
+{pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 2, seeds: [0, 1, 2, 3, 4]}
+{pattern: mixed, rate: 1.0, duration: 120, head_size: 1, warm_replicas: 4, seeds: [0, 1, 2, 3, 4]}

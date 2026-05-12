@@ -1,0 +1,4 @@
+path:           path-2inst-warm
+extra:          --l2_pool_enabled
+ready_time:     16.45s
+warm_hit_e2e:   3.14s

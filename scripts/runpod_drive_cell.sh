@@ -52,6 +52,10 @@ done
 : "${TEMPLATE:=${REPO}/k8s/raycluster-runpod.yaml}"
 : "${TIMEOUT_READY_S:=600}"
 : "${TIMEOUT_TRACE_S:=1800}"
+# Per-pod GPU allocation. Defaults match runpod 8xH100 single-pod-per-instance
+# (8 GPUs each). Lambda 8xA100 with 4+4 split: HEAD_GPUS=4 WARM_GPUS_PER_REPLICA=4.
+: "${HEAD_GPUS:=8}"
+: "${WARM_GPUS_PER_REPLICA:=8}"
 
 if [[ -z "$WORKLOAD" || -z "$OUT_DIR" ]]; then
   echo "usage: $0 --workload PATH --out DIR [--head-size N --warm-replicas N ...]" >&2
@@ -70,9 +74,11 @@ mkdir -p "$OUT_DIR"
 YAML="$OUT_DIR/raycluster.yaml"
 
 # --- Step 1: mutate RC yaml ---
-python3 - "$TEMPLATE" "$YAML" "$WARM_REPLICAS" <<'PYEOF'
+python3 - "$TEMPLATE" "$YAML" "$WARM_REPLICAS" "$HEAD_GPUS" "$WARM_GPUS_PER_REPLICA" <<'PYEOF'
 import sys, yaml, pathlib
 src, dst, warm_replicas = sys.argv[1], sys.argv[2], int(sys.argv[3])
+head_gpus = int(sys.argv[4])
+warm_gpus_per_replica = int(sys.argv[5])
 rc = yaml.safe_load(open(src))
 
 def find_container(spec, name):
@@ -92,8 +98,7 @@ for wg in rc["spec"].get("workerGroupSpecs", []):
 
 # Adjust HETUDIT_EXPECTED_GPUS / HETUDIT_MACHINE_NUMS for warm > 0.
 if warm_replicas > 0:
-    head_gpus = 8
-    warm_gpus = 8 * warm_replicas
+    warm_gpus = warm_gpus_per_replica * warm_replicas
     total_gpus = head_gpus + warm_gpus
     for e in api.get("env", []):
         if e.get("name") == "HETUDIT_EXPECTED_GPUS":

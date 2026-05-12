@@ -1,0 +1,7 @@
+path:           path1-default
+extra_arg:      
+apply_to_ready: 27.12s
+end_to_end:     2.13s
+final_status:   completed
+cstrace_lines:  10
+outdir:         /root/results/path1-default-025435

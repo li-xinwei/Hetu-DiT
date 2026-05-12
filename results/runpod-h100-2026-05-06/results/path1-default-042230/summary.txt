@@ -1,0 +1,4 @@
+path:           path1-default
+extra:          
+ready_time:     21.44s
+e2e:            1.08s

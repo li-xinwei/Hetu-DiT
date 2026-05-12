@@ -1,0 +1,14 @@
+workload_pattern=mixed-r1.0
+pool_size=3
+head_size=1
+warm_replicas=2
+model=sd3
+n_requests_planned=124
+n_requests_served=124
+seed=3
+wall_clock_s=141.764
+t_boot_to_l2=11.0
+t_bind_warm=0.0
+t_bind_cold_l2=1.0
+t_bind_cold=1.0
+mode=sim
