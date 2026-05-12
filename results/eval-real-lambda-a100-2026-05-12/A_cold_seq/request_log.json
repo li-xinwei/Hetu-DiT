@@ -1,0 +1,35 @@
+{
+  "cell": "A_cold_seq",
+  "l2_pool": false,
+  "n_gpus": 4,
+  "n_requests": 1,
+  "apply_to_ready_s": 78.09793727200031,
+  "workload_wall_s": 1.0076286720000098,
+  "results": [
+    {
+      "req_id": "seq-0",
+      "task_id": "task-seq-0_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.0023744509999232832,
+      "post_to_done_s": 1.0075509070002227,
+      "ack_to_done_s": 1.0051764560002994,
+      "final_status": "completed",
+      "received_at": 3307.936274486
+    }
+  ],
+  "final_metrics": {
+    "requests_total": 1,
+    "requests_hit_ready": 1,
+    "requests_hit_warm": 0,
+    "requests_hit_l2": 0,
+    "requests_hit_cold": 0,
+    "request_latency_ms_count": 0,
+    "p50_ms": 0.0,
+    "p95_ms": 0.0,
+    "p99_ms": 0.0,
+    "queue_p50_ms": 0.0,
+    "queue_p95_ms": 0.0,
+    "process_start_ts": 1778576596.6361759,
+    "uptime_s": 74.12942957878113
+  }
+}

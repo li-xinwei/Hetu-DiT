@@ -1,0 +1,105 @@
+{
+  "cell": "A_cold_burst8",
+  "l2_pool": false,
+  "n_gpus": 4,
+  "n_requests": 8,
+  "apply_to_ready_s": 76.09236635700017,
+  "workload_wall_s": 1.0313932010003555,
+  "results": [
+    {
+      "req_id": "burst-0",
+      "task_id": "task-burst-0_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.005636705000142683,
+      "post_to_done_s": 1.0178311720001147,
+      "ack_to_done_s": 1.012194466999972,
+      "final_status": "completed",
+      "received_at": 3406.734699058
+    },
+    {
+      "req_id": "burst-1",
+      "task_id": "task-burst-1_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.00662499600002775,
+      "post_to_done_s": 1.0195905450000282,
+      "ack_to_done_s": 1.0129655490000005,
+      "final_status": "completed",
+      "received_at": 3406.73558835
+    },
+    {
+      "req_id": "burst-2",
+      "task_id": "task-burst-2_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.007204514000022755,
+      "post_to_done_s": 1.0196167819999573,
+      "ack_to_done_s": 1.0124122679999346,
+      "final_status": "completed",
+      "received_at": 3406.736790135
+    },
+    {
+      "req_id": "burst-3",
+      "task_id": "task-burst-3_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.00805537100040965,
+      "post_to_done_s": 1.0204882020002515,
+      "ack_to_done_s": 1.0124328309998418,
+      "final_status": "completed",
+      "received_at": 3406.73841698
+    },
+    {
+      "req_id": "burst-4",
+      "task_id": "task-burst-4_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.007041517999823554,
+      "post_to_done_s": 1.019498535999901,
+      "ack_to_done_s": 1.0124570180000774,
+      "final_status": "completed",
+      "received_at": 3406.740768482
+    },
+    {
+      "req_id": "burst-5",
+      "task_id": "task-burst-5_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.009745424000357161,
+      "post_to_done_s": 1.019531847000053,
+      "ack_to_done_s": 1.0097864229996958,
+      "final_status": "completed",
+      "received_at": 3406.742580324
+    },
+    {
+      "req_id": "burst-6",
+      "task_id": "task-burst-6_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.0072398110000904126,
+      "post_to_done_s": 1.017204958000093,
+      "ack_to_done_s": 1.0099651470000026,
+      "final_status": "completed",
+      "received_at": 3406.743641334
+    },
+    {
+      "req_id": "burst-7",
+      "task_id": "task-burst-7_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.009940474999893922,
+      "post_to_done_s": 1.0179063629998382,
+      "ack_to_done_s": 1.0079658879999442,
+      "final_status": "completed",
+      "received_at": 3406.744994534
+    }
+  ],
+  "final_metrics": {
+    "requests_total": 8,
+    "requests_hit_ready": 8,
+    "requests_hit_warm": 0,
+    "requests_hit_l2": 0,
+    "requests_hit_cold": 0,
+    "request_latency_ms_count": 0,
+    "p50_ms": 0.0,
+    "p95_ms": 0.0,
+    "p99_ms": 0.0,
+    "queue_p50_ms": 0.0,
+    "queue_p95_ms": 0.0,
+    "process_start_ts": 1778576697.4536295,
+    "uptime_s": 72.13191604614258
+  }
+}

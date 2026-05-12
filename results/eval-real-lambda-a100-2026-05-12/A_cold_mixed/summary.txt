@@ -1,0 +1,15 @@
+cell=A_cold_mixed
+workload_pattern=mixed
+pool_size=4
+head_size=1
+warm_replicas=0
+model=sd3
+n_requests_planned=10
+n_requests_served=10
+seed=0
+mode=real
+l2_pool_enabled=false
+apply_to_ready_s=76.108
+workload_wall_s=8.913
+p95_total_s=1.012
+cstrace_lines=112

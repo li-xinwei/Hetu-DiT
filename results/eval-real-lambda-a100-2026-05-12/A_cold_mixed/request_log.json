@@ -1,0 +1,125 @@
+{
+  "cell": "A_cold_mixed",
+  "l2_pool": false,
+  "n_gpus": 4,
+  "n_requests": 10,
+  "apply_to_ready_s": 76.10834319500009,
+  "workload_wall_s": 8.913173165999979,
+  "results": [
+    {
+      "req_id": "poisson-mixed-0",
+      "task_id": "task-poisson-mixed-0_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.0036158269999759796,
+      "post_to_done_s": 1.010282833999554,
+      "ack_to_done_s": 1.006667006999578,
+      "final_status": "completed",
+      "received_at": 3520.169221634
+    },
+    {
+      "req_id": "poisson-mixed-1",
+      "task_id": "task-poisson-mixed-1_768x768",
+      "config_hw": "768x768",
+      "post_to_ack_s": 0.004152638000050501,
+      "post_to_done_s": 1.0110337179999078,
+      "ack_to_done_s": 1.0068810799998573,
+      "final_status": "completed",
+      "received_at": 3522.031571612
+    },
+    {
+      "req_id": "poisson-mixed-2",
+      "task_id": "task-poisson-mixed-2_1280x1280",
+      "config_hw": "1280x1280",
+      "post_to_ack_s": 0.004031191000194667,
+      "post_to_done_s": 1.0117236500000217,
+      "ack_to_done_s": 1.007692458999827,
+      "final_status": "completed",
+      "received_at": 3523.450782437
+    },
+    {
+      "req_id": "poisson-mixed-3",
+      "task_id": "task-poisson-mixed-3_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.003965159000017593,
+      "post_to_done_s": 1.0111309479998454,
+      "ack_to_done_s": 1.0071657889998278,
+      "final_status": "completed",
+      "received_at": 3523.996261226
+    },
+    {
+      "req_id": "poisson-mixed-4",
+      "task_id": "task-poisson-mixed-4_768x768",
+      "config_hw": "768x768",
+      "post_to_ack_s": 0.004078882000158046,
+      "post_to_done_s": 1.0108838500000275,
+      "ack_to_done_s": 1.0068049679998694,
+      "final_status": "completed",
+      "received_at": 3524.297811894
+    },
+    {
+      "req_id": "poisson-mixed-5",
+      "task_id": "task-poisson-mixed-5_1280x1280",
+      "config_hw": "1280x1280",
+      "post_to_ack_s": 0.0034520229996815033,
+      "post_to_done_s": 1.0121197149996988,
+      "ack_to_done_s": 1.0086676920000173,
+      "final_status": "completed",
+      "received_at": 3525.012916903
+    },
+    {
+      "req_id": "poisson-mixed-6",
+      "task_id": "task-poisson-mixed-6_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.004227505000017118,
+      "post_to_done_s": 1.012003564999759,
+      "ack_to_done_s": 1.0077760599997418,
+      "final_status": "completed",
+      "received_at": 3525.528857094
+    },
+    {
+      "req_id": "poisson-mixed-7",
+      "task_id": "task-poisson-mixed-7_768x768",
+      "config_hw": "768x768",
+      "post_to_ack_s": 0.003668582000045717,
+      "post_to_done_s": 1.0101650910000899,
+      "ack_to_done_s": 1.0064965090000442,
+      "final_status": "completed",
+      "received_at": 3527.060320791
+    },
+    {
+      "req_id": "poisson-mixed-8",
+      "task_id": "task-poisson-mixed-8_1280x1280",
+      "config_hw": "1280x1280",
+      "post_to_ack_s": 0.0033738030001586594,
+      "post_to_done_s": 1.0097278210000695,
+      "ack_to_done_s": 1.0063540179999109,
+      "final_status": "completed",
+      "received_at": 3527.422789246
+    },
+    {
+      "req_id": "poisson-mixed-9",
+      "task_id": "task-poisson-mixed-9_1024x1024",
+      "config_hw": "1024x1024",
+      "post_to_ack_s": 0.0025214679999407963,
+      "post_to_done_s": 1.009839644999829,
+      "ack_to_done_s": 1.0073181769998882,
+      "final_status": "completed",
+      "received_at": 3528.070754376
+    }
+  ],
+  "final_metrics": {
+    "requests_total": 18,
+    "requests_hit_ready": 18,
+    "requests_hit_warm": 0,
+    "requests_hit_l2": 0,
+    "requests_hit_cold": 0,
+    "request_latency_ms_count": 0,
+    "p50_ms": 0.0,
+    "p95_ms": 0.0,
+    "p99_ms": 0.0,
+    "queue_p50_ms": 0.0,
+    "queue_p95_ms": 0.0,
+    "process_start_ts": 1778576810.875071,
+    "uptime_s": 80.02936601638794
+  }
+}

@@ -1,0 +1,15 @@
+cell=B_warm1_seq
+workload_pattern=seq
+pool_size=4
+head_size=1
+warm_replicas=3
+model=sd3
+n_requests_planned=1
+n_requests_served=1
+seed=0
+mode=real
+l2_pool_enabled=true
+apply_to_ready_s=74.102
+workload_wall_s=4.022
+p95_total_s=4.022
+cstrace_lines=35

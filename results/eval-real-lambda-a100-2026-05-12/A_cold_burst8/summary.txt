@@ -1,0 +1,15 @@
+cell=A_cold_burst8
+workload_pattern=burst
+pool_size=4
+head_size=1
+warm_replicas=0
+model=sd3
+n_requests_planned=8
+n_requests_served=8
+seed=0
+mode=real
+l2_pool_enabled=false
+apply_to_ready_s=76.092
+workload_wall_s=1.031
+p95_total_s=1.020
+cstrace_lines=98
