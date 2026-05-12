@@ -35,3 +35,8 @@ def cst_print(stage: str, **fields: Any) -> None:
     for k, v in fields.items():
         parts.append(f"{k}={v}")
     print(" ".join(parts), flush=True, file=sys.stdout)
+
+
+def cst_request(req_id: str, stage: str, **fields: Any) -> None:
+    """Emit a per-request CSTRACE line: stage prefixed with `request_`."""
+    cst_print(f"request_{stage}", req_id=req_id, **fields)

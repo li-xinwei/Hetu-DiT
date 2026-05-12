@@ -19,7 +19,19 @@ from hetu_dit.config.config import (
 )
 from hetu_dit.core.request_manager.efficient_ilp import select_tasks
 from hetu_dit.core.request_manager.request_manager import RequestManager
-from hetu_dit.cstrace import cst_print
+from hetu_dit.cstrace import cst_print, cst_request
+from hetu_dit import metrics as _eval_metrics
+
+
+def _record_dispatch(task_id: str, hit_type: str, executor) -> None:
+    """Emit per-request dispatch marker + bump in-process metrics counter."""
+    cst_request(
+        task_id,
+        "dispatched",
+        hit_type=hit_type,
+        executor_id=getattr(executor, "name", id(executor)),
+    )
+    _eval_metrics.record_dispatch(task_id, hit_type)
 from hetu_dit.executor.executor_base import ExecutorBase
 from hetu_dit.executor.gpu_executor import RayGPUExecutorAsync
 from hetu_dit.logger import init_logger
@@ -400,6 +412,8 @@ class AsyncServingEngine:
             )
             results = await task1
             cst_print("execute_model_done", task_id=task_id)
+            cst_request(task_id, "done")
+            _eval_metrics.record_done(task_id)
             if "Model_Profiler" in input_config.prompt:
                 self.model_profiler.save_data(tag=task_id, results=results)
             else:
@@ -1569,12 +1583,13 @@ class AsyncServingEngine:
                 )
                 self.executor_states[executor] = "busy"
                 executor.set_state("busy")
+                _record_dispatch(task_id, "ready", executor)
                 return executor
 
             # D2 PR1: try warm L2 pool — executor with matching parallel config
             # but parked at L2 (CPU pipeline ready, GPU not yet loaded).
             if new_engine_config.runtime_config.l2_pool_enabled:
-                warm = self._find_warm_l2_executor(parallel_config_name)
+                warm, hit_kind = self._find_warm_l2_executor(parallel_config_name)
                 if warm is not None:
                     logger.info(
                         "task_id=%s: warm L2 executor found for %s; upgrading to active via bind_to_instance",
@@ -1589,6 +1604,7 @@ class AsyncServingEngine:
                     await bind_task
                     self.executor_states[warm] = "busy"
                     warm.set_state("busy")
+                    _record_dispatch(task_id, hit_kind or "l2", warm)
                     return warm
 
             needed_workers = cal_needed_workers(new_engine_config)
@@ -1684,6 +1700,7 @@ class AsyncServingEngine:
                         new_executor
                     )  # Created the executor with this name, waking up the previously waiting coroutines that obtained the executor.
                 self._executor_condition.notify_all()
+                _record_dispatch(task_id, "cold", new_executor)
                 return new_executor
 
             executors = self.executors_dict.get(parallel_config_name, [])
@@ -1847,6 +1864,7 @@ class AsyncServingEngine:
                         new_executor
                     )  # Created the executor with this name, waking up the previously waiting coroutines that obtained the executor.
                 self._executor_condition.notify_all()
+                _record_dispatch(task_id, "cold", new_executor)
                 return new_executor
 
             executors = self.executors_dict.get(parallel_config_name, [])
@@ -2626,7 +2644,7 @@ class AsyncServingEngine:
 
     def _find_warm_l2_executor(
         self, parallel_config_name: str
-    ) -> Optional["RayGPUExecutorAsync"]:
+    ) -> Tuple[Optional["RayGPUExecutorAsync"], Optional[str]]:
         """D2 PR1: find an executor with matching parallel config whose workers
         are all parked at L2 (CPU pipeline ready, GPU not loaded).
 
@@ -2677,7 +2695,7 @@ class AsyncServingEngine:
                 getattr(chosen, "name", repr(chosen)),
                 getattr(chosen, "global_ranks", None),
             )
-            return chosen
+            return chosen, "warm"
         if candidates_any:
             chosen = candidates_any[0]
             logger.info(
@@ -2685,8 +2703,8 @@ class AsyncServingEngine:
                 getattr(chosen, "name", repr(chosen)),
                 getattr(chosen, "global_ranks", None),
             )
-            return chosen
-        return None
+            return chosen, "l2"
+        return None, None
 
     def _notify_executor_ready(self, parallel_config_name: str):
         # When the executor becomes ready, attempts to allocate to waiting requests.

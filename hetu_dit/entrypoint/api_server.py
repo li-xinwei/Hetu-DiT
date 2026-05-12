@@ -38,7 +38,8 @@ from tqdm.asyncio import tqdm
 from hetu_dit.utils import create_new_config, make_profile_key
 
 from hetu_dit.entrypoint.utils import build_output_filename, get_bind_host
-from hetu_dit.cstrace import cst_print
+from hetu_dit.cstrace import cst_print, cst_request
+from hetu_dit import metrics as _eval_metrics
 
 cst_print("imports_done")
 
@@ -447,6 +448,11 @@ async def get_status(task_id: str):
     return {"task_id": task_id, **results_store[task_id]}
 
 
+@app.get("/metrics")
+async def metrics():
+    return JSONResponse(_eval_metrics.snapshot())
+
+
 def find_least_busy_machine(
     detect_meta: dict, constrained_worker_ids: list[int] = None
 ) -> int:
@@ -488,7 +494,10 @@ async def generate(request: Request):
     """Generate image for the request."""
     request_dict = await request.json()
     logger.info("enter generate")
-    cst_print("generate_received", req_id=request_dict.get("req_id", "?"))
+    _req_id_for_trace = request_dict.get("req_id", "?")
+    cst_print("generate_received", req_id=_req_id_for_trace)
+    cst_request(_req_id_for_trace, "start")
+    _eval_metrics.record_received(_req_id_for_trace)
     req_id = request_dict.get("req_id", None)
     prompt = request_dict.get("prompt")
     negative_prompt = request_dict.get("negative_prompt", "")
