@@ -1,10 +1,10 @@
 {
   "schema_version": "eval-v1",
-  "rationale": "Reference single-request latencies on a HOT cluster (model already on GPU, no cold-start). SLO threshold = multiplier (default 2.5) * the value below, matching TridentServe (arxiv 2510.02838) convention.",
+  "rationale": "Reference single-request latencies on a HOT cluster (model already on GPU, no cold-start). Measured against the 2026-05-06 RunPod H100 SXM 4-GPU session: path4-3req req2_e2e = req3_e2e = 3.21s for SD3 1024x1024 20 steps. SLO threshold = multiplier (default 2.5) * the value below, matching TridentServe (arxiv 2510.02838) convention.",
   "calibration_date": "2026-05-11",
-  "source": "Inferred from results/runpod-h100-2026-05-06/results/path-2inst-warm-042402/ — observed 3.0 s inference for SD3 1024x1024 20 steps on H100 SXM 4-GPU once the model was bound and warm. Recalibrate against B5 (hot cluster baseline) before Phase 5 real-mode run.",
+  "source": "Inferred from results/runpod-h100-2026-05-06/results/path-2inst-warm-042402/ \u2014 observed 3.0 s inference for SD3 1024x1024 20 steps on H100 SXM 4-GPU once the model was bound and warm. Recalibrate against B5 (hot cluster baseline) before Phase 5 real-mode run.",
   "latencies_ms": {
-    "sd3,1024,1024": 3000,
+    "sd3,1024,1024": 3210,
     "sd3,2048,2048": 12000,
     "sd3,768,768": 1800,
     "flux,1024,1024": 3500,

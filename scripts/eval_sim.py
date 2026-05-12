@@ -38,12 +38,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Default timing constants (seconds). Tunable per-run via CLI.
-T_BOOT_TO_L2_DEFAULT = 25.0  # process_start → prepare_for_l2_done
-T_BIND_WARM_DEFAULT = 3.14   # observed warm-hit total in path-2inst-warm-042402
-T_BIND_COLD_L2_DEFAULT = 12.0  # single-pod L2 (path4) bind time (no warm tag)
-T_BIND_COLD_DEFAULT = 35.0   # path1 default cold start total time
-T_INFER_SD3_1024 = 3.0       # SD3 1024x1024 20 steps inference time
+# Default timing constants (seconds). Calibrated against the 2026-05-06
+# RunPod H100 SXM 4-GPU session, tunable per-run via CLI. All numbers were
+# extracted from cstrace.log in results/runpod-h100-2026-05-06/results/.
+#
+#   T_BOOT_TO_L2 = 11.0     process_start → startup_complete on L2-enabled
+#                           path (no GPU load during boot). Real range
+#                           across path4 / path-warm-baseline: 10.94–11.0s.
+#   T_BIND_WARM = 0.0       warm-tagged pod at L2 → active transition is
+#                           essentially free. Empirically:
+#                             warm_hit_e2e − T_INFER ≈ 3.14 − 3.21 ≈ 0s.
+#   T_BIND_COLD_L2 = 1.0    Head pod first request bind (path4-3req):
+#                             req1_e2e − req2_e2e = 4.25 − 3.21 = 1.04s.
+#   T_INFER = 3.21          SD3 1024² 20 steps inference on H100 SXM 4-GPU
+#                           in active state (path4-3req req2/req3 = 3.21s).
+T_BOOT_TO_L2_DEFAULT = 11.0
+T_BIND_WARM_DEFAULT = 0.0
+T_BIND_COLD_L2_DEFAULT = 1.0
+T_BIND_COLD_DEFAULT = 1.0   # post-boot bind cost only — boot delay handled separately by wait_for_pod
+T_INFER_SD3_1024 = 3.21
 
 
 @dataclass
