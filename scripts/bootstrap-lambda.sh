@@ -62,7 +62,7 @@ if ! kubectl get ds -n kube-system nvidia-device-plugin-daemonset >/dev/null 2>&
     kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
 fi
 # Wait for node to advertise GPUs
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     gpus=$(kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}' 2>/dev/null)
     [[ "$gpus" =~ ^[0-9]+$ ]] && [[ "$gpus" -ge 4 ]] && { log "node has $gpus GPUs allocatable"; break; }
     sleep 5
