@@ -1,0 +1,160 @@
+[
+  {
+    "cell": "01_cold_baseline_no_l2",
+    "l2_pool": false,
+    "n_gpus": 4,
+    "apply_to_ready_s": 18.010699347010814,
+    "sequential": {
+      "req_id": "01_cold_baseline_no_l2_seq",
+      "task_id": "task-01_cold_baseline_no_l2_seq_1024x1024",
+      "ack_s": 0.00184984301449731,
+      "total_s": 1.0051454619970173,
+      "final": {
+        "task_id": "task-01_cold_baseline_no_l2_seq_1024x1024",
+        "status": "completed",
+        "output": "/root/results/stable_diffusion_3_result_task-01_cold_baseline_no_l2_seq_1024x1024.png"
+      }
+    },
+    "burst_n": 4,
+    "burst_results": [
+      {
+        "req_id": "a_forest_landscape_0",
+        "task_id": "task-a_forest_landscape_0_1024x1024",
+        "ack_s": 0.002869313000701368,
+        "total_s": 1.0086738799873274,
+        "final": {
+          "task_id": "task-a_forest_landscape_0_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_0_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_1",
+        "task_id": "task-a_forest_landscape_1_1024x1024",
+        "ack_s": 0.003440967993810773,
+        "total_s": 1.0088453579810448,
+        "final": {
+          "task_id": "task-a_forest_landscape_1_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_1_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_2",
+        "task_id": "task-a_forest_landscape_2_1024x1024",
+        "ack_s": 0.003521737002301961,
+        "total_s": 1.0092648940044455,
+        "final": {
+          "task_id": "task-a_forest_landscape_2_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_2_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_3",
+        "task_id": "task-a_forest_landscape_3_1024x1024",
+        "ack_s": 0.004045433015562594,
+        "total_s": 7.018041802017251,
+        "final": {
+          "task_id": "task-a_forest_landscape_3_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_3_1024x1024.png"
+        }
+      }
+    ],
+    "final_metrics": {
+      "requests_total": 4,
+      "requests_hit_ready": 4,
+      "requests_hit_warm": 0,
+      "requests_hit_l2": 0,
+      "requests_hit_cold": 0,
+      "request_latency_ms_count": 0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "queue_p50_ms": 0.0,
+      "queue_p95_ms": 0.0,
+      "process_start_ts": 1778569896.7739737,
+      "uptime_s": 22.779744863510132
+    }
+  },
+  {
+    "cell": "02_l2_pool_enabled",
+    "l2_pool": true,
+    "n_gpus": 4,
+    "apply_to_ready_s": 16.009689908009022,
+    "sequential": {
+      "req_id": "02_l2_pool_enabled_seq",
+      "task_id": "task-02_l2_pool_enabled_seq_1024x1024",
+      "ack_s": 0.0017265940259676427,
+      "total_s": 3.0096842600032687,
+      "final": {
+        "task_id": "task-02_l2_pool_enabled_seq_1024x1024",
+        "status": "completed",
+        "output": "/root/results/stable_diffusion_3_result_task-02_l2_pool_enabled_seq_1024x1024.png"
+      }
+    },
+    "burst_n": 4,
+    "burst_results": [
+      {
+        "req_id": "a_forest_landscape_0",
+        "task_id": "task-a_forest_landscape_0_1024x1024",
+        "ack_s": 0.002542127011111006,
+        "total_s": 3.01098305801861,
+        "final": {
+          "task_id": "task-a_forest_landscape_0_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_0_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_1",
+        "task_id": "task-a_forest_landscape_1_1024x1024",
+        "ack_s": 0.003969042998505756,
+        "total_s": 5.015538076026132,
+        "final": {
+          "task_id": "task-a_forest_landscape_1_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_1_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_2",
+        "task_id": "task-a_forest_landscape_2_1024x1024",
+        "ack_s": 0.005554587987717241,
+        "total_s": 9.024191014003009,
+        "final": {
+          "task_id": "task-a_forest_landscape_2_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_2_1024x1024.png"
+        }
+      },
+      {
+        "req_id": "a_forest_landscape_3",
+        "task_id": "task-a_forest_landscape_3_1024x1024",
+        "ack_s": 0.0033667690004222095,
+        "total_s": 8.020961964997696,
+        "final": {
+          "task_id": "task-a_forest_landscape_3_1024x1024",
+          "status": "completed",
+          "output": "/root/results/stable_diffusion_3_result_task-a_forest_landscape_3_1024x1024.png"
+        }
+      }
+    ],
+    "final_metrics": {
+      "requests_total": 4,
+      "requests_hit_ready": 0,
+      "requests_hit_warm": 0,
+      "requests_hit_l2": 4,
+      "requests_hit_cold": 0,
+      "request_latency_ms_count": 0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "queue_p50_ms": 0.0,
+      "queue_p95_ms": 0.0,
+      "process_start_ts": 1778569939.5059793,
+      "uptime_s": 24.790898084640503
+    }
+  }
+]

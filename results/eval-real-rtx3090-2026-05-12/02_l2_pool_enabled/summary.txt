@@ -1,0 +1,15 @@
+cell=02_l2_pool_enabled
+workload_pattern=burst-n4
+pool_size=4
+head_size=1
+warm_replicas=3
+model=sd3
+n_requests_planned=5
+n_requests_served=5
+seed=0
+wall_clock_s=27.040336133009987
+mode=real
+l2_pool_enabled=true
+apply_to_ready_s=16.010
+sequential_request_total_s=3.010
+burst_p95_total_s=8.021
