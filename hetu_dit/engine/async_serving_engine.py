@@ -748,6 +748,31 @@ class AsyncServingEngine:
                 e,
             )
 
+    def _get_resident_executor(self):
+        """The single resident executor the serial dispatcher drives.
+
+        Reuses the static-placement executor (already given init_static_env +
+        an initial init_instance_model by init_all_executors at startup).
+        Single-GPU == exactly one. The >1-GPU resident pool is L2/PR-4 and
+        out of scope for the "does not collapse on the test box" bar.
+        """
+        if getattr(self, "_resident_exec", None) is not None:
+            return self._resident_exec
+        for executors in self.executors_dict.values():
+            if executors:
+                self._resident_exec = executors[0]
+                # startup init_all_executors bound it to the default model
+                self._resident_bound_model = self.default_model_id
+                logger.info(
+                    "[engine] resident executor pinned: %s (bound=%s)",
+                    getattr(self._resident_exec, "name", "?"),
+                    self._resident_bound_model,
+                )
+                return self._resident_exec
+        raise RuntimeError(
+            "no static-placement executor available for serial dispatch"
+        )
+
     async def _serial_execute(
         self,
         input_config: "InputConfig" = None,
@@ -755,35 +780,57 @@ class AsyncServingEngine:
         task_id: str = None,
         machine_id=None,
     ):
-        """The proven-safe executor path, run to completion by the single
-        dispatcher consumer (1 task in flight == the §8.31 closed-loop
-        invariant that is deadlock-free even across model switches).
+        """fix#2 (context.md §8.35): bypass the deadlock-prone machinery.
+
+        The serial dispatcher guarantees exactly one task in flight, so we
+        drive ONE resident executor directly: rebind the model only when it
+        changes (reusing the §8.31 CPU-singleton ~0-2s reload), then run
+        execute_model to completion. NO get_ready_executor_or_reconfigure /
+        _mark_executor_busy / _notify_executor_ready_by_executor /
+        search_reconfigure / waiting_* — the circular-wait machinery (§8.33)
+        is never entered, so it cannot deadlock.
         """
         engine_config = engine_config or self.engine_config
         model_id, model_entry = self._resolve_model_id(input_config, engine_config)
-        logger.debug(
-            "task_id %s entered _serial_execute, model_id=%s, ulysses_degree=%s",
-            task_id,
-            model_id,
-            engine_config.parallel_config.ulysses_degree,
-        )
-        await self._assign_machine(engine_config, machine_id)
-        parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_executor_key(
-            model_id, parallel_config, engine_config.machine_id
-        )
-        logger.debug("parallel_config_name is %s", parallel_config_name)
-        executor = await self.get_ready_executor_or_reconfigure(
-            parallel_config_name, engine_config, task_id
-        )
+        ex = self._get_resident_executor()
 
-        await self._mark_executor_busy(parallel_config_name, executor)
-        executor.engine_config.diffusion_stage_ranks = executor.global_ranks
-        # AWAIT to completion (serial invariant) instead of backgrounding:
-        # the next task only starts once this executor is free again.
-        await self.run_single_executor(
-            executor, input_config, model_entry.model_class, task_id=task_id
+        # rebind only on model change (switch-on-change; cheap per §8.31)
+        if getattr(self, "_resident_bound_model", None) != model_id:
+            logger.info(
+                "[engine] serial rebind %s -> %s (task %s)",
+                getattr(self, "_resident_bound_model", None),
+                model_id,
+                task_id,
+            )
+            ex.engine_config.model_config.model = model_entry.model_path
+            bind_task = await ex._run_workers_async(
+                "init_instance_model",
+                engine_config=ex.engine_config,
+                model_class=model_entry.model_class,
+            )
+            await bind_task
+            self._resident_bound_model = model_id
+
+        ex.engine_config.diffusion_stage_ranks = ex.global_ranks
+        run_task_handle = await ex._run_workers_async(
+            "execute_model",
+            engine_config=ex.engine_config,
+            input_config=input_config,
+            model_class=model_entry.model_class,
+            task_id=task_id,
         )
+        results = await run_task_handle
+        try:
+            if input_config is not None and "Model_Profiler" in (
+                input_config.prompt or ""
+            ):
+                self.model_profiler.save_data(tag=task_id, results=results)
+            else:
+                global_profiler.end(
+                    results=results, tag=task_id, ranks=ex.global_ranks
+                )
+        except Exception as e:  # noqa: BLE001 — profiling must not stall
+            logger.warning("[engine] profiler.end skipped for %s: %s", task_id, e)
 
     async def run_task_batch(
         self, input_configs=None, engine_configs=None, task_ids=None
