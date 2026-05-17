@@ -95,3 +95,35 @@ get_ready_executor_or_reconfigure — still hits a Ray-side stall; next
 suspect: the reused Path-C reconfigure under serial still wedging).
 ```
 ```
+
+
+## fix#3 UPDATE (2026-05-17) — validate commit 8d4ce2b
+
+fix#1 (wrap, f6e4ec6) and fix#2 (bypass-dispatch, cdeebde) were both
+GPU-tested and BOTH collapsed identically (context.md §8.35/§8.36).
+Root cause finally localized from the fix#2 JSON (sd3 `done` froze at
+exactly 21 = the count before the first sd3->flux switch): the wedge is
+`init_instance_model` doing load-new **before** free-old, so a live model
+swap peaks at OLD+NEW VRAM (sd3 14GB + flux 24GB ≈ 38GB) and OOMs/hangs
+`.to("cuda")` on a 40GB card → the Ray RPC never returns.
+
+fix#3 (commit 8d4ce2b) frees the previous model before loading the next.
+
+Validation notes:
+- MUST test on a card where OLD+NEW would NOT fit if unfreed, to actually
+  exercise the fix: a **40GB** A100 (Lambda gpu_1x_a100_sxm4) is ideal —
+  sd3+flux unfreed = 38GB ~ 40GB (the failing case). On 80GB the bug is
+  masked (38GB fits), so an 80GB PASS does not prove fix#3.
+- Run the EXACT §8.32 config (sd3,flux rate-scale 0.05 duration 60).
+- PASS = sd3 `done` climbs past ~21 and the queue keeps draining
+  (GPU not stuck at 0% with a non-empty queue); the JSON timeseries
+  `sd3.outstanding` trends DOWN to ~0, completion >> 22/96.
+- FAIL (still) = freeze at the first model switch again ⇒ there is a
+  SECOND wedge beyond VRAM (e.g. init_instance_model not re-entrant for
+  live re-invoke even with VRAM freed) ⇒ Phase-4.5 architecture rewrite
+  of the worker model lifecycle is required; sync with Yifei.
+- Lambda env recipe (context.md §8.36): venv --system-site-packages on
+  Lambda Stack torch2.7/py3.10; pin numpy==1.26.4 scipy==1.13.1
+  diffusers==0.32.0 transformers==4.49.0; flash-attn wheel
+  cu12torch2.7cxx11abiTRUE-cp310 (v2.7.4.post1); HF `hf download` —
+  pass each --exclude separately, never a bare positional glob.
