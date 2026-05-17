@@ -1,0 +1,51 @@
+name: lint
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  syntax-and-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install ruff
+        run: pip install --upgrade pip ruff==0.6.9
+
+      - name: Compile-all (syntax check)
+        run: |
+          python -m compileall -q hetu_dit scripts || (echo "compileall failed" && exit 1)
+
+      - name: Ruff (correctness only)
+        # E9 / F63 / F7 — pure syntax / correctness. F82 dropped (noisy on vendored pipelines).
+        run: ruff check --select=E9,F63,F7 hetu_dit scripts
+
+  pytest-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: syntax-and-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install pytest + pulp
+        # Both small (~6 MB total). torch / ray / diffusers deliberately NOT
+        # installed — Phase-2 unit tests use tests/conftest.py:load_module
+        # to bypass hetu_dit/__init__.py's eager diffusers import.
+        run: pip install --upgrade pip pytest==8.3.3 pulp
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v

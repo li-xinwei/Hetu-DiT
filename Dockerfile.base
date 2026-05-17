@@ -1,0 +1,47 @@
+# hetudit-base — long-lived dependency layer for Hetu-DiT.
+#
+# Contains: PyTorch + CUDA runtime, system libs, all third-party Python deps
+# (mirrored from setup.py via requirements-base.txt), and the flash-attn
+# prebuilt wheel. Does NOT contain hetu_dit source — that lives in the thin
+# app image (Dockerfile) which uses `FROM hetudit-base:${BASE_TAG}`.
+#
+# Rebuild only when requirements-base.txt or this file changes; see
+# k8s/IMAGE_LAYERS.md for the operator workflow.
+
+# Match the validated deploy config (xinwei/k8s-deploy:Dockerfile). The
+# upstream main Dockerfile pins pytorch 2.5.1+cu124 but that combination has
+# never been validated against the PKU dind cluster — we use the same base as
+# what currently runs in production.
+FROM pytorch/pytorch:2.3.1-cuda11.8-cudnn8-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/hetudit \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+RUN groupadd --system --gid 10001 hetudit && \
+    useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/hetudit --shell /usr/sbin/nologin hetudit
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip
+
+# Install flash-attn FIRST, before requirements-base.txt. yunchang (a
+# transitive dep of hetu_dit) depends on flash_attn at *build time*, and
+# flash_attn's setup.py imports torch — which fails under pip's default
+# build isolation (build env has no torch). Installing the prebuilt wheel
+# for cu118/torch2.3/py3.10/cxx11abi=False satisfies the dep without
+# triggering a 20–30 min CUDA kernel compile, and means yunchang sees
+# flash-attn already-installed when its turn comes.
+RUN python3 -m pip install \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3%2Bcu118torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+
+COPY requirements-base.txt /tmp/requirements-base.txt
+RUN python3 -m pip install -r /tmp/requirements-base.txt && \
+    rm /tmp/requirements-base.txt
