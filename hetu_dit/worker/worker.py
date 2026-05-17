@@ -419,6 +419,28 @@ class Worker:
         Used to init the small comm group in a assigned comm group
         """
         engine_config = engine_config or self.engine_config
+
+        # fix#3 (context.md §8.36): unload-before-load for live model swap.
+        # The Ray worker actor's self.model persists across init_instance_model
+        # calls. Without freeing the previous model first, a live swap peaks
+        # at OLD+NEW VRAM (e.g. sd3 14GB + flux 24GB ≈ 38GB) and OOMs / hangs
+        # the .to("cuda") on a 40GB card — that hang is the deeper wedge that
+        # fix#1/#2 (dispatch-layer only) never reached. Freeing first makes the
+        # peak max(OLD,NEW), so the swap fits and the RPC returns.
+        if getattr(self, "model", None) is not None:
+            try:
+                old = self.model
+                self.model = None
+                del old
+                import gc as _gc
+
+                _gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.info("Freed previous model before live swap.")
+            except Exception as e:  # noqa: BLE001 — unload must not wedge swap
+                logger.warning(f"pre-swap unload best-effort failed: {e}")
+
         self.model = _load_serving_pipeline(engine_config, model_class)
 
         # move the model to GPU
