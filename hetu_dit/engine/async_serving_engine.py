@@ -678,6 +678,35 @@ class AsyncServingEngine:
         engine_config.model_id = model_id
         return model_id, entry
 
+    def _ensure_serial_dispatcher(self):
+        """Lazily build+start the collapse-proof serial dispatcher.
+
+        Called from run_task (async context, event loop running). See
+        serial_dispatcher.py and context.md §8.32/§8.33: the legacy path
+        head-of-line-deadlocked under open-loop concurrency. We funnel every
+        run_task through ONE serial consumer that runs the *proven-safe*
+        (§8.31 closed-loop) executor path to completion one-at-a-time, with
+        non-blocking admission so the HTTP/queue layer never stalls.
+        """
+        if getattr(self, "_serial", None) is not None:
+            return
+        from hetu_dit.engine.serial_dispatcher import SerialModelDispatcher
+
+        async def _bind(_model_id, _payload):
+            # Model (re)binding is handled inside the reused executor path
+            # (get_ready_executor_or_reconfigure); nothing to do here.
+            return None
+
+        async def _execute(payload):
+            await self._serial_execute(**payload)
+
+        max_q = int(getattr(self, "_serial_max_queue", 256))
+        self._serial = SerialModelDispatcher(_bind, _execute, max_queue=max_q)
+        self._serial.start()
+        logger.info(
+            "[engine] serial dispatcher started (max_queue=%d)", max_q
+        )
+
     async def run_task(
         self,
         input_config: "InputConfig" = None,
@@ -685,16 +714,55 @@ class AsyncServingEngine:
         task_id: str = None,
         machine_id=None,
     ):
+        """Non-blocking admission into the serial dispatcher.
+
+        Returns immediately (the actual work runs in the dispatcher's single
+        consumer). This is what makes the HTTP/scheduler layer immune to the
+        §8.32 head-of-line collapse: a slow/queued model can never freeze the
+        consumer that pulls subsequent requests.
         """
-        According to the requested engine_config, select an idle executor to execute the task
-        (the logic for the 3 cases is all handled in get_ready_executor_or_reconfigure).
-        If there is no idle executor, wait; if there is no executor corresponding to the configuration,
-        reconfigure and create one, and then wait.
+        from hetu_dit.engine.serial_dispatcher import SubmitRejected
+
+        engine_config = engine_config or self.engine_config
+        model_id, _model_entry = self._resolve_model_id(input_config, engine_config)
+        self._ensure_serial_dispatcher()
+        try:
+            self._serial.submit(
+                task_id,
+                model_id,
+                {
+                    "input_config": input_config,
+                    "engine_config": engine_config,
+                    "task_id": task_id,
+                    "machine_id": machine_id,
+                },
+            )
+        except SubmitRejected as e:
+            # Admission control / backpressure: shed load instead of
+            # accepting work that can never complete. Surface as a failed
+            # task; the /status poller will see no image and the bench
+            # counts it as a (correctly) shed request.
+            logger.warning(
+                "[engine] task %s REJECTED by admission control: %s",
+                task_id,
+                e,
+            )
+
+    async def _serial_execute(
+        self,
+        input_config: "InputConfig" = None,
+        engine_config: "EngineConfig" = None,
+        task_id: str = None,
+        machine_id=None,
+    ):
+        """The proven-safe executor path, run to completion by the single
+        dispatcher consumer (1 task in flight == the §8.31 closed-loop
+        invariant that is deadlock-free even across model switches).
         """
         engine_config = engine_config or self.engine_config
         model_id, model_entry = self._resolve_model_id(input_config, engine_config)
         logger.debug(
-            "task_id %s entered run_task, model_id=%s, ulysses_degree=%s",
+            "task_id %s entered _serial_execute, model_id=%s, ulysses_degree=%s",
             task_id,
             model_id,
             engine_config.parallel_config.ulysses_degree,
@@ -711,11 +779,10 @@ class AsyncServingEngine:
 
         await self._mark_executor_busy(parallel_config_name, executor)
         executor.engine_config.diffusion_stage_ranks = executor.global_ranks
-        self._schedule_background_task(
-            self.run_single_executor(
-                executor, input_config, model_entry.model_class, task_id=task_id
-            ),
-            description=f"run_task[{task_id}]",
+        # AWAIT to completion (serial invariant) instead of backgrounding:
+        # the next task only starts once this executor is free again.
+        await self.run_single_executor(
+            executor, input_config, model_entry.model_class, task_id=task_id
         )
 
     async def run_task_batch(
