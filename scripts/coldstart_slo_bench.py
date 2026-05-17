@@ -138,7 +138,7 @@ def _post_generate(base, req, rid):
         return resp.status, json.loads(resp.read())
 
 
-def _poll(base, task_id, timeout_s):
+def _poll(base, task_id, timeout_s, interval):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -150,11 +150,11 @@ def _poll(base, task_id, timeout_s):
                 return True, d
         except urllib.error.URLError:
             pass
-        time.sleep(1.0)
+        time.sleep(interval)
     return False, {"status": "timeout"}
 
 
-def run(base, workload, poll_timeout):
+def run(base, workload, poll_timeout, poll_interval):
     records = []
     prev_model = None
     for req in workload:
@@ -168,7 +168,7 @@ def run(base, workload, poll_timeout):
         if code >= 400:
             records.append({**req, "ok": False, "error": f"http{code}:{body}"})
             continue
-        ok, st = _poll(base, body["task_id"], poll_timeout)
+        ok, st = _poll(base, body["task_id"], poll_timeout, poll_interval)
         latency = time.time() - t0
         records.append(
             {
@@ -284,6 +284,8 @@ def main():
         help="alternate pattern: same-model run length (1st=cold, rest=warm)",
     )
     ap.add_argument("--poll-timeout", type=int, default=180)
+    ap.add_argument("--poll-interval", type=float, default=0.1,
+                    help="status poll granularity (s); 0.1 resolves sub-2s cold/warm deltas")
     ap.add_argument("--slo-interactive", type=float, default=10.0)
     ap.add_argument("--slo-relaxed", type=float, default=30.0)
     ap.add_argument("--out", default="coldstart_slo_result.json")
@@ -306,7 +308,7 @@ def main():
         f"{n_sw} model-switches",
         flush=True,
     )
-    recs = run(a.base_url, wl, a.poll_timeout)
+    recs = run(a.base_url, wl, a.poll_timeout, a.poll_interval)
     summary = analyze(recs, a.slo_interactive, a.slo_relaxed)
     with open(a.out, "w") as fh:
         json.dump({"summary": summary, "records": recs}, fh, indent=2)
