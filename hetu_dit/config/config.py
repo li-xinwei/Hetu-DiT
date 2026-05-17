@@ -253,6 +253,10 @@ class EngineConfig:
     encode_stage_rank: Optional[List[int]] = None
     diffusion_stage_ranks: Optional[List[int]] = None
     decode_stage_ranks: Optional[List[int]] = None
+    # M1 multi-model: the model_id this executor is bound to. Set by
+    # AsyncServingEngine._resolve_model_id when dispatching a request so that
+    # _notify_executor_ready_by_executor can rebuild the executor_key prefix.
+    model_id: Optional[str] = None
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs."""
@@ -274,6 +278,9 @@ class InputConfig:
     seed: int = 42
     output_type: str = "pil"
     task_id: str = ""
+    # M1 multi-model routing: which registered model this request targets.
+    # Resolved by the engine; None falls back to engine.default_model_id.
+    model_id: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.prompt, list):
@@ -296,6 +303,12 @@ class ServingConfig:
     engine_config: EngineConfig
     input_config: InputConfig
     model_class: Optional[Type] = None
+    # M1 multi-model: full registry. When set, AsyncServingEngine populates
+    # self.models from this list; otherwise it synthesizes a single entry from
+    # (model_class, engine_config.model_config.model) for legacy --model-class
+    # callers.
+    models: Optional[List["ModelEntry"]] = None
+    default_model_id: Optional[str] = None
 
 
 @dataclass

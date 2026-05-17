@@ -14,11 +14,34 @@ import traceback
 import random
 from hetu_dit.engine.async_serving_engine import AsyncServingEngine
 from hetu_dit.config import hetuDiTArgs, EngineConfig, InputConfig, ServingConfig
+from hetu_dit.config.config import ModelEntry
 from diffusers import StableDiffusion3Pipeline
 from diffusers import CogVideoXPipeline
 from diffusers import FluxPipeline
 from diffusers import HunyuanDiTPipeline
 from diffusers import HunyuanVideoPipeline
+
+
+# Map short model-class tokens (CLI/request) → diffusers Pipeline class. Used
+# by both legacy --model-class and the new --models multi-model registration.
+MODEL_CLASS_REGISTRY = {
+    "sd3": StableDiffusion3Pipeline,
+    "sd3.5": StableDiffusion3Pipeline,
+    "cogvideox": CogVideoXPipeline,
+    "flux": FluxPipeline,
+    "hunyuandit": HunyuanDiTPipeline,
+    "hunyuanvideo": HunyuanVideoPipeline,
+}
+
+
+def _resolve_pipeline_class(class_name: str):
+    cls = MODEL_CLASS_REGISTRY.get(class_name)
+    if cls is None:
+        raise ValueError(
+            f"Invalid model class: {class_name!r}; "
+            f"available: {sorted(MODEL_CLASS_REGISTRY)}"
+        )
+    return cls
 from hetu_dit.logger import init_logger
 from hetu_dit.config.config import EngineConfig, InputConfig, ParallelConfig
 from hetu_dit.core.request_manager.scheduler import Scheduler
@@ -398,8 +421,22 @@ async def generate(request: Request):
     num_inference_steps = request_dict.get("num_inference_steps", 20)
     seed = request_dict.get("seed", 42)
 
-    # Generate unique task ID
-    task_id = f"task-{req_id}_{width}x{height}"
+    # M1 multi-model routing: pick which registered model serves this request.
+    # Default falls back to engine.default_model_id so old clients without a
+    # `model` field keep working unchanged.
+    model_id = request_dict.get("model") or engine.default_model_id
+    if model_id not in engine.models:
+        return JSONResponse(
+            {
+                "error": "unknown model",
+                "requested": model_id,
+                "available": list(engine.models),
+            },
+            status_code=400,
+        )
+
+    # Generate unique task ID (model_id embedded for cstrace/grep ergonomics)
+    task_id = f"task-{req_id}_{model_id}_{width}x{height}"
     global_profiler.start(task_id, request_dict.copy())
     # Get number of visible GPUs from environment
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -423,6 +460,7 @@ async def generate(request: Request):
         num_frames,
         num_visible_gpus,
         engine.engine_config.runtime_config.use_parallel_text_encoder,
+        model_class=engine.models[model_id].model_class,
     )
     logger.debug(
         f"The parallel degree is determined as: data_parallel_degree={data_parallel_degree}, use_cfg_parallel={use_cfg_parallel}, ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, tensor_parallel_degree={tensor_parallel_degree}, pipefusion_parallel_degree={pipefusion_parallel_degree}"
@@ -455,6 +493,9 @@ async def generate(request: Request):
         task_id=task_id,
         machine_id=machine_id,
     )
+    # Tag the per-request input_config with the resolved model_id so that
+    # AsyncServingEngine.run_task can route to the right registered model.
+    input_config.model_id = model_id
 
     # Add request to the queue
     scheduler.record_start_time(task_id)
@@ -469,7 +510,10 @@ async def generate(request: Request):
         or engine.search_mode == "multi_machine_efficient_ilp"
         or engine.search_mode == "greedy_splitk"
     ):
-        model_name = engine.model_class_name
+        # Profiler entries are per-model; route the lookup to the request's
+        # model_id rather than the engine default so multi-model deployments
+        # don't share a single profile table.
+        model_name = model_id
         profile_key = make_profile_key(input_config)
         t_dict = engine.model_profiler.get_performance_data(model_name, profile_key)
         t_dict = {k: v * input_config.num_inference_steps for k, v in t_dict.items()}
@@ -700,11 +744,68 @@ async def generate_image(
     return "success"
 
 
+def _parse_models_cli(raw_models: list[str]) -> list[ModelEntry]:
+    """Parse repeated --models tokens of form 'model_id=path' into ModelEntry.
+
+    The model_id token must exist in MODEL_CLASS_REGISTRY (short names: sd3,
+    flux, hunyuandit, ...). Custom IDs would require an extra --model-class-of
+    override mechanism (deferred to a future PR).
+    """
+    entries: list[ModelEntry] = []
+    seen_ids = set()
+    for token in raw_models:
+        if "=" not in token:
+            raise ValueError(
+                f"--models expects 'model_id=path', got {token!r}"
+            )
+        model_id, _, model_path = token.partition("=")
+        model_id = model_id.strip()
+        model_path = model_path.strip()
+        if not model_id or not model_path:
+            raise ValueError(f"--models malformed entry: {token!r}")
+        if model_id in seen_ids:
+            raise ValueError(f"--models duplicate model_id: {model_id!r}")
+        seen_ids.add(model_id)
+        entries.append(
+            ModelEntry(
+                model_id=model_id,
+                model_class=_resolve_pipeline_class(model_id),
+                model_path=model_path,
+            )
+        )
+    return entries
+
+
 def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
     """Create AsyncServingEngine from arguments."""
-    # Convert args to hetuDiTArgs
+    # M1 multi-model registration. If --models is provided, build the full
+    # registry; otherwise fall back to legacy --model-class single-entry path
+    # so existing deployments keep working byte-for-byte.
+    raw_models = getattr(args, "models", None) or []
+    if raw_models:
+        models_list = _parse_models_cli(raw_models)
+        default_model_id = args.default_model or models_list[0].model_id
+        if default_model_id not in {m.model_id for m in models_list}:
+            raise ValueError(
+                f"--default-model {default_model_id!r} not in --models "
+                f"{[m.model_id for m in models_list]}"
+            )
+        default_entry = next(m for m in models_list if m.model_id == default_model_id)
+        primary_model_class = default_entry.model_class
+        primary_model_path = default_entry.model_path
+        primary_model_class_name = default_model_id
+    else:
+        models_list = None
+        default_model_id = None
+        primary_model_class = _resolve_pipeline_class(args.model_class)
+        primary_model_path = args.model
+        primary_model_class_name = args.model_class
+
+    # Convert args to hetuDiTArgs; engine_config.model_config.model carries the
+    # *default* model path. _resolve_model_id swaps it per request when serving
+    # multiple models.
     engine_args = hetuDiTArgs(
-        model=args.model,
+        model=primary_model_path,
         download_dir=args.download_dir,
         trust_remote_code=args.trust_remote_code,
         # Parallel configs
@@ -732,22 +833,13 @@ def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
 
     # Create engine configs
     engine_config, input_config = engine_args.create_config(is_serving=True)
-    if args.model_class == "sd3" or args.model_class == "sd3.5":
-        serving_config = ServingConfig(
-            engine_config, input_config, StableDiffusion3Pipeline
-        )
-    elif args.model_class == "cogvideox":
-        serving_config = ServingConfig(engine_config, input_config, CogVideoXPipeline)
-    elif args.model_class == "flux":
-        serving_config = ServingConfig(engine_config, input_config, FluxPipeline)
-    elif args.model_class == "hunyuandit":
-        serving_config = ServingConfig(engine_config, input_config, HunyuanDiTPipeline)
-    elif args.model_class == "hunyuanvideo":
-        serving_config = ServingConfig(
-            engine_config, input_config, HunyuanVideoPipeline
-        )
-    else:
-        raise ValueError(f"Invalid model class: {args.model_class}")
+    serving_config = ServingConfig(
+        engine_config=engine_config,
+        input_config=input_config,
+        model_class=primary_model_class,
+        models=models_list,
+        default_model_id=default_model_id,
+    )
 
     # Create engine
     return AsyncServingEngine.from_engine_args(
@@ -757,7 +849,7 @@ def create_engine(args: argparse.Namespace) -> AsyncServingEngine:
         args.stage_level,
         args.encode_worker_ids,
         args.decode_worker_ids,
-        args.model_class,
+        primary_model_class_name,
     )
 
 
@@ -790,8 +882,32 @@ def main():
         help="Scheduling strategy to use (priority, fifo, ilp_fix, or ilp_random)",
     )
     # ========== for scheduler =========
-    # Add hetuDiTArgs for model class
+    # Add hetuDiTArgs for model class (legacy single-model path; superseded by
+    # --models when both are present, but kept for back-compat with old launch
+    # scripts).
     parser.add_argument("--model-class", type=str, default="sd3")
+
+    # M1 multi-model serving registry. Repeat once per model:
+    #   --models sd3=stabilityai/stable-diffusion-3-medium-diffusers
+    #   --models flux=black-forest-labs/FLUX.1-dev
+    # The model_id (token before =) must match a known short name in
+    # MODEL_CLASS_REGISTRY; the path is forwarded to Pipeline.from_pretrained.
+    parser.add_argument(
+        "--models",
+        action="append",
+        default=None,
+        help="Repeated entries of 'model_id=hf_path_or_local_path'. When set, "
+             "/generate accepts a 'model' field naming any registered model_id; "
+             "unknown ids return HTTP 400.",
+    )
+    parser.add_argument(
+        "--default-model",
+        type=str,
+        default=None,
+        help="The model_id used when /generate omits the 'model' field. "
+             "Required when --models has more than one entry; defaults to the "
+             "first --models entry otherwise.",
+    )
 
     # Add hetuDiTArgs for search mode
     parser.add_argument("--search-mode", type=str, default="random")
@@ -994,6 +1110,7 @@ def determine_parallel_degrees(
     num_frames: int,
     max_degrees: int = 8,
     use_text_encoder_parallel: bool = False,
+    model_class=None,
 ):
     """
     Determine parallelism parameters based on input image resolution.
@@ -1002,6 +1119,9 @@ def determine_parallel_degrees(
     Return values:
     (data_parallel_degree, use_cfg_parallel, ulysses_degree, ring_degree,
      tensor_parallel_degree, pipefusion_parallel_degree)
+
+    `model_class` selects the rule table for the request's model. Falls back to
+    the engine's default model class for legacy single-model callers.
     """
     img_size = height * width * num_frames
 
@@ -1013,33 +1133,36 @@ def determine_parallel_degrees(
     tensor_parallel_degree = 1
     pipefusion_parallel_degree = 1
 
+    if model_class is None:
+        model_class = engine.model_class
+
     # Random Ruled candidates in order: (condition, new degrees tuple)
-    if engine.model_class == HunyuanDiTPipeline:
+    if model_class == HunyuanDiTPipeline:
         rules = [
             (img_size <= 768 * 768, (1, 1, 1, 1)),  # default
             (img_size <= 1024 * 1024, (2, 1, 1, 1)),  # ulysses=2, ring=2 2211
             (img_size <= 2048 * 2048, (4, 1, 1, 1)),  # tensor=2, pipefusion=2 1122
             (True, (8, 1, 1, 1)),  # ulysses=2, ring=2, pipefusion=2 2212
         ]
-    elif engine.model_class == StableDiffusion3Pipeline:
+    elif model_class == StableDiffusion3Pipeline:
         rules = [
             (img_size <= 1024 * 1536, (1, 1, 1, 1)),
             (True, (2, 1, 1, 1)),
         ]
-    elif engine.model_class == FluxPipeline:
+    elif model_class == FluxPipeline:
         rules = [
             (img_size <= 512 * 512, (1, 1, 1, 1)),  # default
             (img_size <= 1536 * 1536, (2, 1, 1, 1)),  # ulysses=2 2111
             (True, (4, 1, 1, 1)),  # ulysses=2, ring=2, pipefusion=2 2212
         ]
-    elif engine.model_class == CogVideoXPipeline:
+    elif model_class == CogVideoXPipeline:
         rules = [
             (img_size <= 768 * 1024 * 33, (1, 1, 1, 1)),
             (img_size <= 1024 * 1024 * 65, (2, 1, 1, 1)),
             (True, (4, 1, 1, 1)),
         ]
 
-    elif engine.model_class == HunyuanVideoPipeline:
+    elif model_class == HunyuanVideoPipeline:
         rules = [
             (img_size <= 720 * 1280 * 17, (1, 1, 1, 1)),
             (img_size <= 720 * 1280 * 33, (2, 1, 1, 1)),  # default

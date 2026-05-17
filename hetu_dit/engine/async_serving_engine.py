@@ -174,6 +174,8 @@ class AsyncServingEngine:
         stage_level: bool = False,
         encode_worker_ids: Optional[List[int]] = None,
         decode_worker_ids: Optional[List[int]] = None,
+        models: Optional[List[ModelEntry]] = None,
+        default_model_id: Optional[str] = None,
     ) -> None:
         self.engine_config = engine_config
         self.model_config = engine_config.model_config
@@ -184,18 +186,30 @@ class AsyncServingEngine:
         self.executor_class = executor_class
         self.reqs_counter = Counter()
 
-        # M1 plumbing: register a single default model derived from the legacy
-        # --model-class path. PR-2 will populate self.models from --models CLI
-        # and per-request `model` field; for now everything still flows through
-        # default_model_id, so behavior is byte-for-byte identical.
-        self.default_model_id = model_class_name or "_default"
-        self.models: Dict[str, ModelEntry] = {
-            self.default_model_id: ModelEntry(
-                model_id=self.default_model_id,
-                model_class=model_class,
-                model_path=engine_config.model_config.model,
+        # M1 multi-model registry. If `models` is provided, build the dict from
+        # it (multi-model mode). Otherwise synthesize a single entry from the
+        # legacy --model-class path so existing single-model deployments are
+        # unaffected. `default_model_id` is the fallback for requests that omit
+        # the `model` field on /generate.
+        if models:
+            self.models: Dict[str, ModelEntry] = {m.model_id: m for m in models}
+            self.default_model_id = default_model_id or next(iter(self.models))
+        else:
+            self.default_model_id = (
+                default_model_id or model_class_name or "_default"
             )
-        }
+            self.models = {
+                self.default_model_id: ModelEntry(
+                    model_id=self.default_model_id,
+                    model_class=model_class,
+                    model_path=engine_config.model_config.model,
+                )
+            }
+        if self.default_model_id not in self.models:
+            raise ValueError(
+                f"default_model_id={self.default_model_id!r} not in registered "
+                f"models {list(self.models)}"
+            )
 
         self.driver_dummy_worker = None
 
@@ -563,7 +577,17 @@ class AsyncServingEngine:
                 is_serving=True,
                 machine_id=executor.engine_config.machine_id,
             )
-            vae_decoder_parallel_config_name = generate_executor_key(self.default_model_id,
+            # Inherit the parent diffusion executor's bound model so the VAE
+            # sub-executor partitions under the same model_id.
+            parent_model_id = (
+                getattr(executor.engine_config, "model_id", None)
+                or self.default_model_id
+            )
+            parent_entry = self.models[parent_model_id]
+            vae_decoder_config.model_config.model = parent_entry.model_path
+            vae_decoder_config.model_id = parent_model_id
+            vae_decoder_parallel_config_name = generate_executor_key(
+                parent_model_id,
                 vae_decoder_config.parallel_config,
                 executor.engine_config.machine_id,
                 stage="decode",
@@ -585,7 +609,7 @@ class AsyncServingEngine:
                     latents,
                     vae_decoder_executor,
                     input_config,
-                    self.model_class,
+                    parent_entry.model_class,
                     task_id=task_id,
                 ),
                 description=f"run_vae_executor_downscale_vae[{task_id}]",
@@ -630,6 +654,30 @@ class AsyncServingEngine:
             task = asyncio.current_task()
             self.background_tasks.discard(task)
 
+    def _resolve_model_id(
+        self,
+        input_config: Optional["InputConfig"],
+        engine_config: "EngineConfig",
+    ) -> Tuple[str, ModelEntry]:
+        """Resolve the request's target model and align engine_config.
+
+        Reads `input_config.model_id` (falls back to default_model_id), then
+        mutates `engine_config.model_config.model` so downstream
+        `init_instance_model` calls Pipeline.from_pretrained with the right HF
+        path. Raises ValueError on unknown model_id; /generate validates first
+        so this should only fire for internal callers that bypass the API.
+        """
+        requested = getattr(input_config, "model_id", None) if input_config else None
+        model_id = requested or self.default_model_id
+        if model_id not in self.models:
+            raise ValueError(
+                f"Unknown model_id={model_id!r}; available: {list(self.models)}"
+            )
+        entry = self.models[model_id]
+        engine_config.model_config.model = entry.model_path
+        engine_config.model_id = model_id
+        return model_id, entry
+
     async def run_task(
         self,
         input_config: "InputConfig" = None,
@@ -644,20 +692,17 @@ class AsyncServingEngine:
         reconfigure and create one, and then wait.
         """
         engine_config = engine_config or self.engine_config
+        model_id, model_entry = self._resolve_model_id(input_config, engine_config)
         logger.debug(
-            "task_id %s entered run_task, ulysses_degree=%s",
+            "task_id %s entered run_task, model_id=%s, ulysses_degree=%s",
             task_id,
+            model_id,
             engine_config.parallel_config.ulysses_degree,
         )
         await self._assign_machine(engine_config, machine_id)
         parallel_config = engine_config.parallel_config
-        logger.debug(
-            "task_id %s before generate_parallel_config_name, ulysses_degree=%s",
-            task_id,
-            engine_config.parallel_config.ulysses_degree,
-        )
-        parallel_config_name = generate_executor_key(self.default_model_id,
-            parallel_config, engine_config.machine_id
+        parallel_config_name = generate_executor_key(
+            model_id, parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
         executor = await self.get_ready_executor_or_reconfigure(
@@ -668,7 +713,7 @@ class AsyncServingEngine:
         executor.engine_config.diffusion_stage_ranks = executor.global_ranks
         self._schedule_background_task(
             self.run_single_executor(
-                executor, input_config, self.model_class, task_id=task_id
+                executor, input_config, model_entry.model_class, task_id=task_id
             ),
             description=f"run_task[{task_id}]",
         )
@@ -686,10 +731,11 @@ class AsyncServingEngine:
             input_configs, engine_configs, task_ids
         ):
             engine_config = engine_config or self.engine_config
+            model_id, model_entry = self._resolve_model_id(input_config, engine_config)
             await self._assign_machine(engine_config, None)
             parallel_config = engine_config.parallel_config
-            parallel_config_name = generate_executor_key(self.default_model_id,
-                parallel_config, engine_config.machine_id
+            parallel_config_name = generate_executor_key(
+                model_id, parallel_config, engine_config.machine_id
             )
             logger.debug("parallel_config_name is %s", parallel_config_name)
             executor = await self.get_ready_executor_or_reconfigure(
@@ -702,7 +748,7 @@ class AsyncServingEngine:
             executor.engine_config.diffusion_stage_ranks = executor.global_ranks
             self._schedule_background_task(
                 self.run_single_executor(
-                    executor, input_config, self.model_class, task_id=task_id
+                    executor, input_config, model_entry.model_class, task_id=task_id
                 ),
                 description=f"run_task_batch[{task_id}]",
             )
@@ -721,10 +767,11 @@ class AsyncServingEngine:
         """
         logger.debug("enter run_task_disaggregated")
         engine_config = engine_config or self.engine_config
+        model_id, model_entry = self._resolve_model_id(input_config, engine_config)
         await self._assign_machine(engine_config, None, self.diffusion_worker_ids)
         parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_executor_key(self.default_model_id,
-            parallel_config, engine_config.machine_id
+        parallel_config_name = generate_executor_key(
+            model_id, parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
         executor = await self.get_ready_executor_or_reconfigure_disaggregated(
@@ -750,8 +797,11 @@ class AsyncServingEngine:
             is_serving=True,
             machine_id=0,
         )
-        text_encoder_parallel_config_name = generate_executor_key(self.default_model_id,
-            text_encoder_config.parallel_config, 0
+        # Align stage-internal sub-executors with the same model_id so the
+        # disaggregated text-encoder / vae sub-pools partition correctly.
+        text_encoder_config.model_config.model = model_entry.model_path
+        text_encoder_parallel_config_name = generate_executor_key(
+            model_id, text_encoder_config.parallel_config, 0
         )
         text_encoder_executor = (
             await self.get_ready_executor_or_reconfigure_disaggregated(
@@ -780,8 +830,9 @@ class AsyncServingEngine:
             is_serving=True,
             machine_id=0,
         )
-        vae_decoder_parallel_config_name = generate_executor_key(self.default_model_id,
-            vae_decoder_config.parallel_config, 0
+        vae_decoder_config.model_config.model = model_entry.model_path
+        vae_decoder_parallel_config_name = generate_executor_key(
+            model_id, vae_decoder_config.parallel_config, 0
         )
         vae_decoder_executor = (
             await self.get_ready_executor_or_reconfigure_disaggregated(
@@ -846,7 +897,7 @@ class AsyncServingEngine:
                 text_encoder_executor,
                 vae_decoder_executor,
                 input_config,
-                self.model_class,
+                model_entry.model_class,
                 task_id=task_id,
             ),
             description=f"run_task_disaggregated[{task_id}]",
@@ -866,14 +917,15 @@ class AsyncServingEngine:
         reconfigure and create one, and then wait.
         """
         engine_config = engine_config or self.engine_config
+        model_id, model_entry = self._resolve_model_id(input_config, engine_config)
         await self._assign_machine(engine_config, machine_id)
         logger.debug(
             "enter run_task_downscale_vae, found machine_id is %s",
             engine_config.machine_id,
         )
         parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_executor_key(self.default_model_id,
-            parallel_config, engine_config.machine_id
+        parallel_config_name = generate_executor_key(
+            model_id, parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
         executor = await self.get_ready_executor_or_reconfigure(
@@ -892,7 +944,7 @@ class AsyncServingEngine:
                 executor,
                 parallel_config_name,
                 input_config,
-                self.model_class,
+                model_entry.model_class,
                 task_id=task_id,
             ),
             description=f"run_task_downscale_vae[{task_id}]",
@@ -2483,8 +2535,14 @@ class AsyncServingEngine:
         )
         for name, (engine_config, gpu_ids) in instance_dict.items():
             workers = [self.all_workers[i] for i in gpu_ids]
-            parallel_config_name = generate_executor_key(self.default_model_id,
-                engine_config.parallel_config, engine_config.machine_id
+            # Initial static-placement executors are bound to the default model
+            # (the only one with a pre-warmed CPU singleton); other models will
+            # be lazily reconfigured on first request via the dispatcher path.
+            engine_config.model_id = self.default_model_id
+            parallel_config_name = generate_executor_key(
+                self.default_model_id,
+                engine_config.parallel_config,
+                engine_config.machine_id,
             )
             idx = self.executor_config_counters[parallel_config_name]
             self.executor_config_counters[parallel_config_name] += 1
@@ -2527,6 +2585,8 @@ class AsyncServingEngine:
             encode_worker_ids=encode_worker_ids,
             decode_worker_ids=decode_worker_ids,
             model_class_name=model_class_name,
+            models=serving_config.models,
+            default_model_id=serving_config.default_model_id,
         )
         return engine
 
@@ -2575,9 +2635,17 @@ class AsyncServingEngine:
             logger.debug(
                 f"task_id is {task_id}, in _notify_executor_ready_by_executor, executor = {executor}, set state to ready"
             )
+            # Use the executor's bound model_id (set during _resolve_model_id)
+            # so waiting tasks queued under "{model_id}|..." get matched. Falls
+            # back to default for executors created before any request (e.g.
+            # via static_placement_init at startup).
+            bound_model_id = (
+                getattr(executor.engine_config, "model_id", None)
+                or self.default_model_id
+            )
             self._notify_executor_ready(
                 generate_executor_key(
-                    self.default_model_id, executor.engine_config.parallel_config
+                    bound_model_id, executor.engine_config.parallel_config
                 )
             )
             # There may be waiting workers or futures for reconfiguration, which are also notified here.
