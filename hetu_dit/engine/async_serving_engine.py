@@ -14,6 +14,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from hetu_dit.config.config import (
     EngineConfig,
     InputConfig,
+    ModelEntry,
     ParallelConfig,
     ServingConfig,
 )
@@ -94,6 +95,21 @@ def generate_parallel_config_name(
     )
 
 
+def generate_executor_key(
+    model_id: str,
+    parallel_config: "ParallelConfig",
+    machine_id: int = 0,
+    stage: str = "diffusion",
+) -> str:
+    """Compose the executor pool key from model identity and parallel config.
+
+    M1 prerequisite: every executor is now scoped to (model_id, parallel_config).
+    The prefix lets the dispatcher partition pools per model without losing the
+    parallel-config dimension that drives xfuser-style dynamic scheduling.
+    """
+    return f"{model_id}|{generate_parallel_config_name(parallel_config, machine_id, stage)}"
+
+
 def cal_needed_workers(new_engine_config: EngineConfig) -> int:
     pconf = new_engine_config.parallel_config
     dp_degree = pconf.dp_config.dp_degree
@@ -167,6 +183,19 @@ class AsyncServingEngine:
         self.model_class_name = model_class_name
         self.executor_class = executor_class
         self.reqs_counter = Counter()
+
+        # M1 plumbing: register a single default model derived from the legacy
+        # --model-class path. PR-2 will populate self.models from --models CLI
+        # and per-request `model` field; for now everything still flows through
+        # default_model_id, so behavior is byte-for-byte identical.
+        self.default_model_id = model_class_name or "_default"
+        self.models: Dict[str, ModelEntry] = {
+            self.default_model_id: ModelEntry(
+                model_id=self.default_model_id,
+                model_class=model_class,
+                model_path=engine_config.model_config.model,
+            )
+        }
 
         self.driver_dummy_worker = None
 
@@ -534,7 +563,7 @@ class AsyncServingEngine:
                 is_serving=True,
                 machine_id=executor.engine_config.machine_id,
             )
-            vae_decoder_parallel_config_name = generate_parallel_config_name(
+            vae_decoder_parallel_config_name = generate_executor_key(self.default_model_id,
                 vae_decoder_config.parallel_config,
                 executor.engine_config.machine_id,
                 stage="decode",
@@ -627,7 +656,7 @@ class AsyncServingEngine:
             task_id,
             engine_config.parallel_config.ulysses_degree,
         )
-        parallel_config_name = generate_parallel_config_name(
+        parallel_config_name = generate_executor_key(self.default_model_id,
             parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
@@ -659,7 +688,7 @@ class AsyncServingEngine:
             engine_config = engine_config or self.engine_config
             await self._assign_machine(engine_config, None)
             parallel_config = engine_config.parallel_config
-            parallel_config_name = generate_parallel_config_name(
+            parallel_config_name = generate_executor_key(self.default_model_id,
                 parallel_config, engine_config.machine_id
             )
             logger.debug("parallel_config_name is %s", parallel_config_name)
@@ -694,7 +723,7 @@ class AsyncServingEngine:
         engine_config = engine_config or self.engine_config
         await self._assign_machine(engine_config, None, self.diffusion_worker_ids)
         parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_parallel_config_name(
+        parallel_config_name = generate_executor_key(self.default_model_id,
             parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
@@ -721,7 +750,7 @@ class AsyncServingEngine:
             is_serving=True,
             machine_id=0,
         )
-        text_encoder_parallel_config_name = generate_parallel_config_name(
+        text_encoder_parallel_config_name = generate_executor_key(self.default_model_id,
             text_encoder_config.parallel_config, 0
         )
         text_encoder_executor = (
@@ -751,7 +780,7 @@ class AsyncServingEngine:
             is_serving=True,
             machine_id=0,
         )
-        vae_decoder_parallel_config_name = generate_parallel_config_name(
+        vae_decoder_parallel_config_name = generate_executor_key(self.default_model_id,
             vae_decoder_config.parallel_config, 0
         )
         vae_decoder_executor = (
@@ -843,7 +872,7 @@ class AsyncServingEngine:
             engine_config.machine_id,
         )
         parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_parallel_config_name(
+        parallel_config_name = generate_executor_key(self.default_model_id,
             parallel_config, engine_config.machine_id
         )
         logger.debug("parallel_config_name is %s", parallel_config_name)
@@ -895,7 +924,7 @@ class AsyncServingEngine:
             raise ValueError("Worker IDs must be specified for fixed search mode")
 
         parallel_config = engine_config.parallel_config
-        parallel_config_name = generate_parallel_config_name(parallel_config)
+        parallel_config_name = generate_executor_key(self.default_model_id, parallel_config)
         logger.debug(
             f"Adding task for parallel_config_name {parallel_config_name} to workers {worker_ids}"
         )
@@ -2454,7 +2483,7 @@ class AsyncServingEngine:
         )
         for name, (engine_config, gpu_ids) in instance_dict.items():
             workers = [self.all_workers[i] for i in gpu_ids]
-            parallel_config_name = generate_parallel_config_name(
+            parallel_config_name = generate_executor_key(self.default_model_id,
                 engine_config.parallel_config, engine_config.machine_id
             )
             idx = self.executor_config_counters[parallel_config_name]
@@ -2547,7 +2576,9 @@ class AsyncServingEngine:
                 f"task_id is {task_id}, in _notify_executor_ready_by_executor, executor = {executor}, set state to ready"
             )
             self._notify_executor_ready(
-                generate_parallel_config_name(executor.engine_config.parallel_config)
+                generate_executor_key(
+                    self.default_model_id, executor.engine_config.parallel_config
+                )
             )
             # There may be waiting workers or futures for reconfiguration, which are also notified here.
             while self.waiting_worker_tasks:

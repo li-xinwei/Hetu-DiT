@@ -296,3 +296,18 @@ class ServingConfig:
     engine_config: EngineConfig
     input_config: InputConfig
     model_class: Optional[Type] = None
+
+
+@dataclass
+class ModelEntry:
+    """A single model registration for multi-model serving.
+
+    Populated at server startup from --models (or synthesized from legacy
+    --model-class for backward compatibility). model_id is the user-visible
+    token (e.g. "sd3"); model_class is the diffusers Pipeline class used to
+    instantiate the pipeline; model_path is the HF id or local path.
+    """
+
+    model_id: str
+    model_class: Type
+    model_path: str
