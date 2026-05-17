@@ -4,7 +4,8 @@ from typing import Any, Optional
 import time
 import torch
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse, HTMLResponse
+import glob as _glob
 import uvicorn
 import asyncio
 import copy
@@ -59,6 +60,152 @@ app = FastAPI()
 engine = None
 
 results_store = {}
+
+# Single-file manual test UI served at GET /ui. Talks to /models, /generate,
+# /status/{id}, /image/{id}. Kept inline (no static dir) so a single
+# api_server process is fully self-contained for RunPod-proxy testing.
+# All dynamic text goes through textContent / DOM nodes (no innerHTML) so
+# there is no injection surface even though model_ids are server-controlled.
+_WEB_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Hetu-DiT multi-model playground</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+         background:#0b0d10; color:#d7dce2; }
+  header { padding:14px 20px; border-bottom:1px solid #1e2329;
+           font-weight:600; letter-spacing:.3px; }
+  header span { color:#6ee7b7; }
+  main { display:grid; grid-template-columns:380px 1fr; gap:0; height:calc(100vh - 51px); }
+  form { padding:20px; border-right:1px solid #1e2329; overflow-y:auto; }
+  label { display:block; margin:14px 0 4px; color:#8b95a1; font-size:12px;
+          text-transform:uppercase; letter-spacing:.5px; }
+  select,textarea,input { width:100%; background:#13171c; color:#d7dce2;
+          border:1px solid #2a313a; border-radius:6px; padding:9px 10px;
+          font:inherit; }
+  textarea { resize:vertical; min-height:74px; }
+  .row { display:flex; gap:10px; }
+  .row > div { flex:1; }
+  button { margin-top:20px; width:100%; padding:11px; background:#1f6feb;
+          color:#fff; border:0; border-radius:6px; font:inherit;
+          font-weight:600; cursor:pointer; }
+  button:disabled { background:#30363d; cursor:not-allowed; }
+  .panel { padding:20px; display:flex; flex-direction:column; align-items:center;
+          justify-content:center; overflow:auto; }
+  .panel img { max-width:100%; max-height:100%; border-radius:8px;
+          border:1px solid #1e2329; }
+  #stat { color:#8b95a1; font-size:13px; white-space:pre-wrap; text-align:center; }
+  #spin { display:none; width:14px; height:14px; border:2px solid #30363d;
+          border-top-color:#6ee7b7; border-radius:50%; animation:s .8s linear infinite;
+          vertical-align:-2px; margin-right:6px; }
+  #spin.on { display:inline-block; }
+  @keyframes s { to { transform:rotate(360deg);} }
+</style>
+</head>
+<body>
+<header>Hetu-DiT <span>multi-model</span> playground</header>
+<main>
+  <form id="f">
+    <label>Model</label>
+    <select id="model"></select>
+    <label>Prompt</label>
+    <textarea id="prompt">a photorealistic red panda astronaut, studio lighting</textarea>
+    <label>Negative prompt</label>
+    <textarea id="neg"></textarea>
+    <div class="row">
+      <div><label>Width</label><input id="w" type="number" value="512" step="64"/></div>
+      <div><label>Height</label><input id="h" type="number" value="512" step="64"/></div>
+    </div>
+    <div class="row">
+      <div><label>Steps</label><input id="steps" type="number" value="20"/></div>
+      <div><label>Seed</label><input id="seed" type="number" value="42"/></div>
+    </div>
+    <button id="go" type="submit">Generate</button>
+  </form>
+  <div class="panel">
+    <div id="stat"><span id="spin"></span><span id="msg">Pick a model and hit Generate.</span></div>
+    <img id="img" style="display:none"/>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let polling = null;
+
+function say(text, busy){
+  $('msg').textContent = text;
+  $('spin').classList.toggle('on', !!busy);
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/models'); const d = await r.json();
+    const sel = $('model');
+    sel.textContent = '';
+    d.models.forEach(m => {
+      const o = document.createElement('option');
+      o.textContent = m; o.value = m;
+      if (m === d.default) o.selected = true;
+      sel.appendChild(o);
+    });
+  } catch(e) { say('Failed to load /models: ' + e, false); }
+}
+
+function setBusy(b){ $('go').disabled=b; $('go').textContent=b?'Generating…':'Generate'; }
+
+async function poll(taskId, t0){
+  try {
+    const r = await fetch('/status/' + encodeURIComponent(taskId));
+    const d = await r.json();
+    const secs = ((Date.now()-t0)/1000).toFixed(1);
+    if (d.image_url) {
+      clearInterval(polling); polling=null; setBusy(false);
+      $('img').src = d.image_url + '?t=' + Date.now();
+      $('img').style.display='block';
+      say(`done in ${secs}s  (${taskId})`, false);
+    } else {
+      say(`${d.status} · ${secs}s · ${taskId}`, true);
+    }
+  } catch(e) { say('poll error: ' + e, false); }
+}
+
+$('f').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  if (polling) clearInterval(polling);
+  $('img').style.display='none';
+  setBusy(true);
+  say('queuing…', true);
+  const body = {
+    model: $('model').value,
+    prompt: $('prompt').value,
+    negative_prompt: $('neg').value,
+    width: +$('w').value, height: +$('h').value,
+    num_inference_steps: +$('steps').value, seed: +$('seed').value,
+    req_id: 'ui' + Date.now()
+  };
+  try {
+    const r = await fetch('/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (r.status >= 400) {
+      setBusy(false);
+      say('error ' + r.status + ': ' + JSON.stringify(d), false);
+      return;
+    }
+    const t0 = Date.now();
+    polling = setInterval(() => poll(d.task_id, t0), 1500);
+  } catch(e) { setBusy(false); say('request failed: ' + e, false); }
+});
+
+loadModels();
+</script>
+</body>
+</html>"""
 
 PROFILE_ON_STARTUP = False
 PROFILE_REPEAT_TIMES = 1
@@ -369,6 +516,70 @@ async def root():
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
+
+
+def _find_result_image(task_id: str) -> Optional[str]:
+    """Locate the PNG a worker wrote for this task.
+
+    Workers save model-specific filenames under results/ (e.g.
+    stable_diffusion_3_result_{task_id}.png, flux_result_{task_id}.png,
+    hunyuandit_result_{task_id}.png). We glob on the task_id suffix so the
+    lookup is model-agnostic and naturally compatible with PR-2 multi-model
+    routing (task_id already embeds the model_id).
+    """
+    matches = _glob.glob(f"results/*{task_id}.png")
+    if not matches:
+        return None
+    # Newest match wins if a task_id somehow recurs.
+    return max(matches, key=os.path.getmtime)
+
+
+@app.get("/models")
+async def list_models():
+    """Expose the registered multi-model registry for the web UI dropdown."""
+    return {
+        "models": list(engine.models),
+        "default": engine.default_model_id,
+    }
+
+
+@app.get("/status/{task_id}")
+async def status(task_id: str):
+    """Poll-able task status. Adds image_url once the worker has written the PNG.
+
+    The serving engine is async (scheduler queue + background process_queue),
+    so /generate is fire-and-forget. The web UI polls this endpoint until
+    status == 'completed' and an image is available.
+    """
+    entry = results_store.get(task_id)
+    if entry is None:
+        return JSONResponse({"status": "unknown", "task_id": task_id}, status_code=404)
+    resp = {"task_id": task_id, "status": entry.get("status", "unknown")}
+    img = _find_result_image(task_id)
+    if img is not None:
+        resp["image_url"] = f"/image/{task_id}"
+        # The result file exists even if the queue callback hasn't flipped the
+        # status yet; treat presence of the PNG as completion for the UI.
+        if resp["status"] != "completed":
+            resp["status"] = "completed"
+    return resp
+
+
+@app.get("/image/{task_id}")
+async def image(task_id: str):
+    """Serve the generated PNG for a finished task."""
+    path = _find_result_image(task_id)
+    if path is None:
+        return JSONResponse(
+            {"error": "image not ready", "task_id": task_id}, status_code=404
+        )
+    return FileResponse(path, media_type="image/png")
+
+
+@app.get("/ui", response_class=HTMLResponse)
+async def ui():
+    """Minimal single-file web UI for manual multi-model testing."""
+    return HTMLResponse(_WEB_UI_HTML)
 
 
 def find_least_busy_machine(
@@ -983,11 +1194,15 @@ def main():
     )
     logger.info(f"[API Server] use schedule strategy '{args.scheduler_strategy}')")
 
-    # Start server
+    # Start server. Default keeps the historical loopback bind (single-box
+    # local testing); pass --host 0.0.0.0 to expose through the RunPod HTTP
+    # proxy so the /ui playground is reachable from a browser.
     app.root_path = args.root_path
+    bind_host = args.host if args.host else get_loopback_host()
+    logger.info(f"[API Server] binding uvicorn on {bind_host}:{args.port}")
     uvicorn.run(
         app,
-        host=get_loopback_host(),
+        host=bind_host,
         port=args.port,
         log_level="debug",
         timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
