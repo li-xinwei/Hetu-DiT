@@ -420,6 +420,61 @@ class Worker:
         """
         engine_config = engine_config or self.engine_config
 
+        # ── opt#3 (§8.49): per-model WARM PIPELINE CACHE ──────────────
+        # §8.31 proved the *weights* are warm in CPU RAM, yet every swap
+        # still pays ~6-9s re-from_pretrained + wrapper rebuild +
+        # structural teardown. steady_skew's 79%-queue/57s p95 is the
+        # rare-flux switch-stall (≈15-20s of bind+infer+bind-back). SOTA
+        # ("keep models warm", Clockwork/ModelMesh): keep each model's
+        # CONSTRUCTED pipeline resident on CPU; a swap is then just a
+        # device move (old→cpu, target→cuda) + a cheap runtime-state
+        # re-point — NO from_pretrained, NO wrapper rebuild. First touch
+        # per model is the full cold load (then cached). Flag-gated
+        # (HETU_MODEL_CACHE=1); default off = exact prior behaviour
+        # (this is the §8.40-48 fragility zone — benchmark-gated).
+        import os as _os3
+        _use_cache = _os3.environ.get("HETU_MODEL_CACHE", "0") == "1"
+        _ckey = (model_class, getattr(engine_config.model_config, "model",
+                                      None))
+        if not hasattr(self, "_pipe_cache"):
+            self._pipe_cache = {}
+        if _use_cache and _ckey in self._pipe_cache:
+            try:
+                import gc as _gc3
+                _t0 = time.time()
+                cur = getattr(self, "model", None)
+                if cur is not None and cur is not self._pipe_cache[_ckey]:
+                    cur.to("cpu")                 # park prev model on CPU
+                target = self._pipe_cache[_ckey]
+                # re-point the shared serving singletons to `target`
+                # (DiTRuntimeState is scalars per §8.43 — cheap) and
+                # free the prev model's activation/cache GPU buffers.
+                try:
+                    reset_runtime_state(engine_config)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    get_pp_group().reset_buffer()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    reset_cache_manager()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.model = target.to("cuda")
+                self._cur_ckey = _ckey
+                _gc3.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                print(
+                    f"MODELCACHE hit {_ckey[0].__name__} swap_s="
+                    f"{time.time()-_t0:.3f} (no from_pretrained)",
+                    flush=True)
+                return
+            except Exception as e:  # noqa: BLE001 — fall back to cold load
+                print(f"MODELCACHE hit failed, cold-loading: {e}",
+                      flush=True)
+
         # fix#3 (context.md §8.36): unload-before-load for live model swap.
         # The Ray worker actor's self.model persists across init_instance_model
         # calls. Without freeing the previous model first, a live swap peaks
@@ -427,7 +482,37 @@ class Worker:
         # the .to("cuda") on a 40GB card — that hang is the deeper wedge that
         # fix#1/#2 (dispatch-layer only) never reached. Freeing first makes the
         # peak max(OLD,NEW), so the swap fits and the RPC returns.
-        if getattr(self, "model", None) is not None:
+        if _use_cache and getattr(self, "model", None) is not None:
+            # opt#3 cold path: park the prev model on CPU and KEEP it in
+            # the cache (warm for its next turn) instead of del+teardown.
+            # .to('cpu') frees its GPU, so the new model still fits.
+            try:
+                import gc as _gc3b
+                _pk = getattr(self, "_cur_ckey", None)
+                self.model.to("cpu")
+                if _pk is not None:
+                    self._pipe_cache[_pk] = self.model
+                self.model = None
+                try:
+                    reset_runtime_state(engine_config)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    get_pp_group().reset_buffer()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    reset_cache_manager()
+                except Exception:  # noqa: BLE001
+                    pass
+                _gc3b.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                print("MODELCACHE park prev on CPU (cold-load target)",
+                      flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"MODELCACHE park failed: {e}", flush=True)
+        if (not _use_cache) and getattr(self, "model", None) is not None:
             try:
                 import gc as _gc
 
@@ -533,6 +618,11 @@ class Worker:
         # move the model to GPU
         self.model = self.model.to("cuda")
         logger.info("Model moved to GPU.")
+        if _use_cache:
+            # opt#3: cache the freshly-constructed pipeline so its next
+            # turn is a warm device-move (no from_pretrained).
+            self._pipe_cache[_ckey] = self.model
+            self._cur_ckey = _ckey
 
         if self.engine_config.runtime_config.adjust_strategy in ["cache", "p2p"]:
             # 1. Setup cache for the main Transformer
