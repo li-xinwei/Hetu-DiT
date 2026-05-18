@@ -719,6 +719,17 @@ class Worker:
         get_runtime_state().set_p2p_state("computing")
         t1 = global_profiler.timer()
 
+        # §8.45 opt#1: task_id may be a LIST when the dispatcher sent a
+        # same-shape micro-batch (prompt is then a list of the same len);
+        # output.images[i] belongs to _tid(i). Single str => unchanged.
+        _task_ids = task_id if isinstance(task_id, (list, tuple)) else None
+
+        def _tid(i):
+            if _task_ids is not None:
+                return _task_ids[i] if i < len(_task_ids) else _task_ids[-1]
+            return task_id
+        if _task_ids is not None:
+            task_id = _task_ids[0]   # keep states/profiler single-id sane
         self.states["running_task"] = task_id
         self.states["task_start_time"] = time.perf_counter()
         get_runtime_state().worker_state = self.states
@@ -758,10 +769,11 @@ class Worker:
                 for i, image in enumerate(output.images):
                     resolution = f"{input_config.width}x{input_config.height}_{i}"
                     image_rank = dp_group_index * dp_batch_size + i
-                    image.save(f"results/stable_diffusion_3_result_{task_id}.png")
+                    image.save(
+                        f"results/stable_diffusion_3_result_{_tid(i)}.png")
                     logger.info(
-                        f"image {i} saved to ./results/stable_diffusion_3_result_{task_id}.png"
-                    )
+                        f"image {i} -> "
+                        f"results/stable_diffusion_3_result_{_tid(i)}.png")
 
                 t3 = global_profiler.timer()
                 results["store"] = t3
@@ -831,9 +843,9 @@ class Worker:
                     os.makedirs("results", exist_ok=True)
                     for i, image in enumerate(output.images):
                         image_rank = dp_group_index * dp_batch_size + i
-                        image_name = f"flux_result_{task_id}.png"
+                        image_name = f"flux_result_{_tid(i)}.png"
                         image.save(f"results/{image_name}")
-                        logger.info(f"image {i} saved to ./results/{image_name}")
+                        logger.info(f"image {i} -> results/{image_name}")
                     t3 = global_profiler.timer()
                     results["store"] = t3
             elif input_config.output_type == "latent":

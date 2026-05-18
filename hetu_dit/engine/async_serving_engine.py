@@ -700,6 +700,19 @@ class AsyncServingEngine:
         async def _execute(payload):
             await self._serial_execute(**payload)
 
+        async def _execute_batch(payloads):
+            await self._serial_execute_batch(payloads)
+
+        def _shape_fn(payload):
+            # micro-batch key: only requests of the SAME model AND SAME
+            # tensor shape (res+steps) can share one diffusion forward.
+            ic = payload.get("input_config")
+            ec = payload.get("engine_config") or self.engine_config
+            mid, _ = self._resolve_model_id(ic, ec)
+            return (mid, getattr(ic, "width", 0), getattr(ic, "height", 0),
+                    getattr(ic, "num_inference_steps", 0),
+                    getattr(ic, "num_frames", 0))
+
         import os as _os
 
         max_q = int(_os.environ.get("HETU_SERIAL_MAX_QUEUE", 256))
@@ -709,6 +722,12 @@ class AsyncServingEngine:
         batch_n = int(_os.environ.get("HETU_BATCH_MAX_N", 8))
         batch_s = float(_os.environ.get("HETU_BATCH_MAX_S", 20.0))
         starv_s = float(_os.environ.get("HETU_STARVATION_DEADLINE_S", 30.0))
+        # §8.45 opt#1 SOTA micro-batching: DEFAULT-ON (8). Industrial-load
+        # latency was 82–96% queue because the GPU ran one request per
+        # pass; batching same-shape concurrent requests into one diffusion
+        # forward is the SOTA fix. Set HETU_EXEC_BATCH=1 only for the A/B
+        # baseline run.
+        exec_batch = int(_os.environ.get("HETU_EXEC_BATCH", 8))
         self._serial = SerialModelDispatcher(
             _bind,
             _execute,
@@ -716,12 +735,15 @@ class AsyncServingEngine:
             batch_max_n=batch_n,
             batch_max_s=batch_s,
             starvation_deadline_s=starv_s,
+            exec_batch_max=exec_batch,
+            shape_fn=_shape_fn,
+            execute_batch_fn=_execute_batch,
         )
         self._serial.start()
         logger.info(
             "[engine] serial dispatcher started (max_queue=%d batch_n=%d "
-            "batch_s=%.1f starvation_s=%.1f)",
-            max_q, batch_n, batch_s, starv_s,
+            "batch_s=%.1f starvation_s=%.1f exec_batch=%d)",
+            max_q, batch_n, batch_s, starv_s, exec_batch,
         )
 
     async def run_task(
@@ -879,6 +901,84 @@ class AsyncServingEngine:
                 )
         except Exception as e:  # noqa: BLE001 — profiling must not stall
             logger.warning("[engine] profiler.end skipped for %s: %s", task_id, e)
+
+    async def _serial_execute_batch(self, payloads):
+        """§8.45 opt#1: run a micro-batch of same-(model,shape) requests
+        in ONE diffusion forward (the SOTA fix for the 82–96%-queue
+        bottleneck). The dispatcher guarantees every payload here is the
+        same model AND same shape, so they share one GPU pass via the
+        diffusion batch dim (InputConfig already supports prompt:List).
+        """
+        import time as _t
+        import copy as _cp
+
+        if not payloads:
+            return
+        if len(payloads) == 1:
+            return await self._serial_execute(**payloads[0])
+
+        first = payloads[0]
+        engine_config = first.get("engine_config") or self.engine_config
+        base_ic = first["input_config"]
+        task_ids = [p["task_id"] for p in payloads]
+        model_id, model_entry = self._resolve_model_id(base_ic,
+                                                       engine_config)
+        ex = self._get_resident_executor()
+
+        prev_bound = getattr(self, "_resident_bound_model", None)
+        bind_s = 0.0
+        switched = prev_bound is not None and prev_bound != model_id
+        if prev_bound != model_id:
+            ex.engine_config.model_config.model = model_entry.model_path
+            _b0 = _t.time()
+            bt = await ex._run_workers_async(
+                "init_instance_model", engine_config=ex.engine_config,
+                model_class=model_entry.model_class)
+            await bt
+            bind_s = _t.time() - _b0
+            self._resident_bound_model = model_id
+
+        # merge into ONE batched InputConfig (same shape guaranteed):
+        # prompt/negative_prompt become lists -> diffusion batch dim.
+        bic = _cp.copy(base_ic)
+        bic.prompt = [p["input_config"].prompt for p in payloads]
+        negs = [getattr(p["input_config"], "negative_prompt", "") or ""
+                for p in payloads]
+        bic.negative_prompt = negs if any(negs) else ""
+        bic.batch_size = len(payloads)
+        ex.engine_config.diffusion_stage_ranks = ex.global_ranks
+        _i0 = _t.time()
+        rh = await ex._run_workers_async(
+            "execute_model", engine_config=ex.engine_config,
+            input_config=bic, model_class=model_entry.model_class,
+            task_id=task_ids)            # worker saves image[i] -> task_ids[i]
+        results = await rh
+        infer_s = _t.time() - _i0
+        try:
+            _res = f"{base_ic.width}x{base_ic.height}"
+        except Exception:  # noqa: BLE001
+            _res = ""
+        print(
+            f"SWITCHCOST task={task_ids[0]}+{len(task_ids)-1} "
+            f"from={prev_bound} to={model_id} switched={int(switched)} "
+            f"bind_s={bind_s:.3f} infer_s={infer_s:.3f} "
+            f"batch={len(task_ids)} res={_res}", flush=True)
+        # per-request decomposition: bind+infer are SHARED across the
+        # batch (one GPU pass); attribute the shared infer to each.
+        sd = getattr(self, "_serial", None)
+        for tid in task_ids:
+            try:
+                h = sd.get_handle(tid) if sd is not None else None
+                if h is not None:
+                    h.set_switch_cost(bind_s, infer_s, bool(switched))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[engine] batch switch-cost skip %s: %s",
+                               tid, e)
+        try:
+            global_profiler.end(results=results, tag=task_ids[0],
+                                ranks=ex.global_ranks)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[engine] batch profiler.end skip: %s", e)
 
     async def run_task_batch(
         self, input_configs=None, engine_configs=None, task_ids=None
