@@ -566,6 +566,32 @@ async def dispatch_stats():
     }
 
 
+@app.get("/task_timeline")
+async def task_timeline():
+    """Authoritative per-request timeline from the dispatcher's TaskHandles.
+
+    Each handle carries submit_ts / start_ts / done_ts / ok, so a client
+    can compute the exact UX latency decomposition with NO dependence on
+    the §8.41-buggy /status PNG-glob:
+        e2e   = done_ts - submit_ts        (what the user feels)
+        queue = start_ts - submit_ts       (waiting behind others)
+        service = done_ts - start_ts       (bind/switch + inference)
+    Used by scripts/hetu_benchmark.py for SLO-attainment / goodput /
+    percentile / fairness metrics.
+    """
+    d = getattr(engine, "_serial", None)
+    if d is None:
+        return {"ready": False, "handles": []}
+    out = []
+    for h in list(getattr(d, "_handles", {}).values()):
+        out.append({
+            "task_id": h.task_id, "model_id": h.model_id,
+            "submit_ts": h.submit_ts, "start_ts": h.start_ts,
+            "done_ts": h.done_ts, "ok": h.ok,
+        })
+    return {"ready": True, "handles": out}
+
+
 @app.get("/status/{task_id}")
 async def status(task_id: str):
     """Poll-able task status. Adds image_url once the worker has written the PNG.
