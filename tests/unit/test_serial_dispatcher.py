@@ -127,8 +127,16 @@ async def _test_one_failing_task_does_not_stall_consumer_impl():
     assert d.stats["failed"] == 1 and d.stats["completed"] == 10
 
 
-async def _test_bind_only_on_model_change_impl():
-    """Switch-on-change: contiguous same-model runs cause one bind."""
+async def _test_batching_amortizes_switch_impl():
+    """§8.41-FINAL fix: per-model batching reorders same-model work so an
+    alternating submit pattern does NOT switch on every request.
+
+    Old global-FIFO contract would bind on every model change (here 6).
+    The new scheduler batches the bound model's queue, so a burst of
+    alternating sd3/flux submitted together collapses to ~2 binds (drain
+    sd3 batch, then flux batch) — the switch-cost amortization that turns
+    the measured 6-9s/req into 6-9s/batch.
+    """
     binds = []
 
     async def bind_fn(model_id, _p):
@@ -138,15 +146,82 @@ async def _test_bind_only_on_model_change_impl():
     async def execute_fn(_p):
         await asyncio.sleep(0)
 
-    d = SerialModelDispatcher(bind_fn, execute_fn, max_queue=64)
+    d = SerialModelDispatcher(bind_fn, execute_fn, max_queue=64,
+                              batch_max_n=8, batch_max_s=20.0)
     d.start()
-    seq = ["sd3", "sd3", "sd3", "flux", "flux", "sd3"]
+    seq = ["sd3", "flux", "sd3", "flux", "sd3", "flux"]  # alternating
     hs = [d.submit(f"t{i}", m, {}) for i, m in enumerate(seq)]
     await _drain(hs, timeout=5.0)
     await d.stop()
-    # sd3 -> flux -> sd3 == 3 binds, not 6
-    assert binds == ["sd3", "flux", "sd3"], f"over-binding: {binds}"
-    assert d.stats["binds"] == 3
+    assert d.stats["completed"] == 6
+    # batched, NOT one-bind-per-request: far fewer than the 5 switches a
+    # naive FIFO would do on this alternating pattern.
+    assert d.stats["switches"] <= 1, (
+        f"batching failed: {d.stats['switches']} switches, binds={binds}"
+    )
+
+
+async def _test_starvation_freedom_under_extreme_skew_impl():
+    """Suite gate F2: under 50:1 skew the single rare-model request MUST
+    complete within a bounded time (aging anti-starvation), not be
+    starved behind the heavy model forever (the §8.41 flux 0/147 bug).
+    """
+    async def bind_fn(_m, _p):
+        await asyncio.sleep(0.005)
+
+    async def execute_fn(_p):
+        await asyncio.sleep(0.005)
+
+    # short deadline so the test is fast but exercises the override
+    d = SerialModelDispatcher(bind_fn, execute_fn, max_queue=512,
+                              batch_max_n=8, starvation_deadline_s=0.2)
+    d.start()
+    # one flux first, then a long sd3 flood — flux must still complete
+    h_flux = d.submit("flux0", "flux", {})
+    sd3 = [d.submit(f"s{i}", "sd3", {}) for i in range(400)]
+    # flux completes well before the whole sd3 flood drains
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if h_flux.done_ts is not None:
+            break
+        await asyncio.sleep(0.01)
+    flux_done = h_flux.done_ts is not None and h_flux.ok
+    await _drain(sd3, timeout=10.0)
+    await d.stop()
+    assert flux_done, "STARVATION: rare model never completed under skew"
+    assert d.stats["per_model"]["flux"]["completed"] == 1
+
+
+async def _test_fair_selection_round_robins_models_impl():
+    """Steady multi-model load: no model is starved; each makes progress
+    interleaved (least-recently-served fairness), not all-of-A-then-B.
+    """
+    order = []
+
+    async def bind_fn(model_id, _p):
+        await asyncio.sleep(0)
+
+    async def execute_fn(p):
+        order.append(p["m"])
+        await asyncio.sleep(0.002)
+
+    d = SerialModelDispatcher(bind_fn, execute_fn, max_queue=256,
+                              batch_max_n=4, starvation_deadline_s=30.0)
+    d.start()
+    hs = []
+    for i in range(12):
+        hs.append(d.submit(f"a{i}", "A", {"m": "A"}))
+        hs.append(d.submit(f"b{i}", "B", {"m": "B"}))
+    await _drain(hs, timeout=5.0)
+    await d.stop()
+    assert d.stats["completed"] == 24
+    # both models fully served, and not one giant block of 12 then 12:
+    # batching caps a run at batch_max_n, so >=2 alternations occur.
+    blocks = sum(
+        1 for i in range(1, len(order)) if order[i] != order[i - 1]
+    )
+    assert blocks >= 2, f"no interleaving (starvation risk): {order}"
+    assert order.count("A") == 12 and order.count("B") == 12
 
 
 async def _test_timeout_detects_a_hung_consumer_impl():
@@ -182,8 +257,14 @@ def test_admission_control_rejects_when_full():
 def test_one_failing_task_does_not_stall_consumer():
     asyncio.run(_test_one_failing_task_does_not_stall_consumer_impl())
 
-def test_bind_only_on_model_change():
-    asyncio.run(_test_bind_only_on_model_change_impl())
+def test_batching_amortizes_switch():
+    asyncio.run(_test_batching_amortizes_switch_impl())
+
+def test_starvation_freedom_under_extreme_skew():
+    asyncio.run(_test_starvation_freedom_under_extreme_skew_impl())
+
+def test_fair_selection_round_robins_models():
+    asyncio.run(_test_fair_selection_round_robins_models_impl())
 
 def test_timeout_detects_a_hung_consumer():
     asyncio.run(_test_timeout_detects_a_hung_consumer_impl())

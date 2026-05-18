@@ -700,11 +700,28 @@ class AsyncServingEngine:
         async def _execute(payload):
             await self._serial_execute(**payload)
 
-        max_q = int(getattr(self, "_serial_max_queue", 256))
-        self._serial = SerialModelDispatcher(_bind, _execute, max_queue=max_q)
+        import os as _os
+
+        max_q = int(_os.environ.get("HETU_SERIAL_MAX_QUEUE", 256))
+        # §8.41-FINAL scheduler tuning (switch ≈6-9s, infer ≈1-6s on the
+        # validated box). Env-overridable so the suite can be re-tuned
+        # without a code change / redeploy.
+        batch_n = int(_os.environ.get("HETU_BATCH_MAX_N", 8))
+        batch_s = float(_os.environ.get("HETU_BATCH_MAX_S", 20.0))
+        starv_s = float(_os.environ.get("HETU_STARVATION_DEADLINE_S", 30.0))
+        self._serial = SerialModelDispatcher(
+            _bind,
+            _execute,
+            max_queue=max_q,
+            batch_max_n=batch_n,
+            batch_max_s=batch_s,
+            starvation_deadline_s=starv_s,
+        )
         self._serial.start()
         logger.info(
-            "[engine] serial dispatcher started (max_queue=%d)", max_q
+            "[engine] serial dispatcher started (max_queue=%d batch_n=%d "
+            "batch_s=%.1f starvation_s=%.1f)",
+            max_q, batch_n, batch_s, starv_s,
         )
 
     async def run_task(
