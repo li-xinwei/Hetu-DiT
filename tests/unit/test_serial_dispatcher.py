@@ -251,6 +251,53 @@ async def _test_opt2_linger_batches_paced_arrivals_impl():
     assert (h0.done_ts - h0.submit_ts) < 3.0, "linger not bounded"
 
 
+async def _test_opt2b_vram_cap_and_adaptive_linger_impl():
+    """§8.47 opt#2b: (a) the VRAM-aware cap_fn limits a big-shape batch
+    so it can't OOM even with many same-shape queued; (b) adaptive
+    linger returns ~idle-grace fast when no further arrivals (no
+    low-load latency tax)."""
+    sizes = []
+
+    async def bind_fn(_m, _p):
+        await asyncio.sleep(0)
+
+    async def execute_fn(_p):
+        sizes.append(1)
+        await asyncio.sleep(0.005)
+
+    async def execute_batch_fn(ps):
+        sizes.append(len(ps))
+        await asyncio.sleep(0.005)
+
+    def shape_fn(p):
+        return (p["w"], p["h"])
+
+    def cap_fn(p):                       # big shape -> cap 2 (VRAM-aware)
+        return 2 if p["w"] >= 1024 else 8
+
+    d = SerialModelDispatcher(
+        bind_fn, execute_fn, max_queue=64, batch_max_n=64,
+        exec_batch_max=8, shape_fn=shape_fn,
+        execute_batch_fn=execute_batch_fn, batch_cap_fn=cap_fn,
+        batch_linger_s=1.0, batch_linger_poll=0.02)
+    # 8 BIG (1024²) same-shape queued up-front: must NEVER batch >2
+    big = [d.submit(f"b{i}", "sd3", {"w": 1024, "h": 1024})
+           for i in range(8)]
+    d.start()
+    assert await _drain(big, 5.0) == 8
+    assert all(n <= 2 for n in sizes), f"VRAM cap breached: {sizes}"
+    # adaptive linger: a lone request with no followers must complete
+    # well under the full 1.0s linger (idle-grace exit).
+    t0 = asyncio.get_event_loop().time()
+    h = d.submit("lone", "sd3", {"w": 512, "h": 512})
+    await _drain([h], 5.0)
+    await d.stop()
+    assert h.done_ts is not None and h.ok
+    assert (h.done_ts - h.submit_ts) < 0.9, (
+        f"adaptive linger didn't early-exit: "
+        f"{h.done_ts - h.submit_ts:.2f}s")
+
+
 async def _test_starvation_freedom_under_extreme_skew_impl():
     """Suite gate F2: under 50:1 skew the single rare-model request MUST
     complete within a bounded time (aging anti-starvation), not be
@@ -355,6 +402,9 @@ def test_micro_batch_same_shape_one_pass():
 
 def test_opt2_linger_batches_paced_arrivals():
     asyncio.run(_test_opt2_linger_batches_paced_arrivals_impl())
+
+def test_opt2b_vram_cap_and_adaptive_linger():
+    asyncio.run(_test_opt2b_vram_cap_and_adaptive_linger_impl())
 
 def test_starvation_freedom_under_extreme_skew():
     asyncio.run(_test_starvation_freedom_under_extreme_skew_impl())

@@ -119,6 +119,7 @@ class SerialModelDispatcher:
         execute_batch_fn: Optional[Callable[[list], Awaitable[Any]]] = None,
         batch_linger_s: float = 0.0,
         batch_linger_poll: float = 0.1,
+        batch_cap_fn: Optional[Callable[[Any], int]] = None,
     ):
         self._bind = bind_fn
         self._execute = execute_fn
@@ -144,6 +145,17 @@ class SerialModelDispatcher:
         # the queue collapses. 0 = off (safe default / A-B baseline).
         self._batch_linger_s = max(0.0, batch_linger_s)
         self._batch_linger_poll = max(0.01, batch_linger_poll)
+        # adaptive idle grace: stop lingering this long after the LAST
+        # same-shape arrival (not on one empty poll — robust to normal
+        # inter-arrival gaps; kills the low-load latency tax).
+        self._batch_linger_idle = max(self._batch_linger_poll,
+                                      min(0.5, self._batch_linger_s))
+        # opt#2b (§8.47): VRAM-aware per-shape cap. opt#2 OOM'd because an
+        # 8-request batch at 1024² needs ~8× activation memory. cap_fn
+        # returns the max safe batch for THIS request's shape so big
+        # shapes can't over-batch (512²→8, 768²→3, 1024²→2). None =
+        # uncapped (= exec_batch_max).
+        self._batch_cap_fn = batch_cap_fn
 
         # per-model FIFO queues of (task_id, payload, enqueue_ts)
         self._queues: Dict[str, Deque[Tuple[str, Any, float]]] = {}
@@ -285,10 +297,19 @@ class SerialModelDispatcher:
             batch = [(task_id, payload, enq_ts)]
             if (self._exec_batch_max > 1 and self._shape_fn is not None
                     and self._execute_batch is not None):
+                # opt#2b: VRAM-aware effective cap for THIS shape, so a
+                # big-resolution batch can't OOM (the §8.47 failure).
+                eff_cap = self._exec_batch_max
+                if self._batch_cap_fn is not None:
+                    try:
+                        eff_cap = max(1, min(self._exec_batch_max,
+                                             int(self._batch_cap_fn(payload))))
+                    except Exception:  # noqa: BLE001
+                        eff_cap = self._exec_batch_max
                 try:
                     key = self._shape_fn(payload)
                     keep = deque()
-                    while q and len(batch) < self._exec_batch_max:
+                    while q and len(batch) < eff_cap:
                         t2, p2, e2 = q.popleft()
                         if self._shape_fn(p2) == key:
                             batch.append((t2, p2, e2))
@@ -301,38 +322,43 @@ class SerialModelDispatcher:
                         q.appendleft(keep.pop())
                 except Exception:  # noqa: BLE001 — never wedge on shape_fn
                     batch = [(task_id, payload, enq_ts)]
-                # opt#2: dynamic linger — keep accumulating same-shape
-                # arrivals for up to batch_linger_s. Bounded (adds <=
-                # linger to the head request only) and fairness-safe:
-                # abort the moment another model is starving so the
-                # §8.41 starvation guarantee is preserved.
-                if (self._batch_linger_s > 0.0
-                        and len(batch) < self._exec_batch_max):
+                # opt#2b: ADAPTIVE dynamic linger — accumulate same-shape
+                # arrivals up to batch_linger_s, but STOP early if a poll
+                # yields nothing new (no low-load latency tax — the §8.47
+                # industrial 3.0→5.4s regression). Bounded + fairness-safe
+                # (abort if another model is starving).
+                if (self._batch_linger_s > 0.0 and len(batch) < eff_cap):
                     try:
                         skey = self._shape_fn(payload)
                         _lt0 = time.time()
-                        while (len(batch) < self._exec_batch_max
+                        _last_add = _lt0
+                        while (len(batch) < eff_cap
                                and (time.time() - _lt0)
                                < self._batch_linger_s
                                and not self._stopped.is_set()):
-                            # fairness: don't linger if another model has
-                            # a task older than the starvation deadline.
                             if any(self._oldest_age(m, time.time())
                                    > self._starv
                                    for m in self._queues
                                    if m != model_id):
                                 break
                             await asyncio.sleep(self._batch_linger_poll)
+                            _added = 0
                             keep2 = deque()
-                            while q and len(batch) < self._exec_batch_max:
+                            while q and len(batch) < eff_cap:
                                 t3, p3, e3 = q.popleft()
                                 if self._shape_fn(p3) == skey:
                                     batch.append((t3, p3, e3))
                                     self._depth -= 1
+                                    _added += 1
                                 else:
                                     keep2.append((t3, p3, e3))
                             while keep2:
                                 q.appendleft(keep2.pop())
+                            if _added > 0:
+                                _last_add = time.time()
+                            elif (time.time() - _last_add
+                                  > self._batch_linger_idle):
+                                break  # adaptive: arrivals dried up, go now
                     except asyncio.CancelledError:
                         break
                     except Exception:  # noqa: BLE001

@@ -715,6 +715,20 @@ class AsyncServingEngine:
 
         import os as _os
 
+        # opt#2b (§8.47): VRAM-aware per-shape batch cap. Measured on the
+        # 40GB box: batch=8@1024² OOM'd, batch≈2@1024² safe. Budget =
+        # pixels·batch <= 512²·8 ⇒ 512²→8, 768²→3, 1024²→2, 1536²→1.
+        _px_budget = int(_os.environ.get(
+            "HETU_BATCH_PX_BUDGET", 512 * 512 * 8))
+
+        def _batch_cap_fn(payload):
+            ic = payload.get("input_config")
+            w = getattr(ic, "width", 512) or 512
+            h = getattr(ic, "height", 512) or 512
+            nf = getattr(ic, "num_frames", 0) or 0
+            px = w * h * (max(1, nf) if nf > 1 else 1)
+            return max(1, _px_budget // max(1, px))
+
         max_q = int(_os.environ.get("HETU_SERIAL_MAX_QUEUE", 256))
         # §8.41-FINAL scheduler tuning (switch ≈6-9s, infer ≈1-6s on the
         # validated box). Env-overridable so the suite can be re-tuned
@@ -732,7 +746,12 @@ class AsyncServingEngine:
         # paced industrial arrivals this is what actually fills batches;
         # bounded + fairness-safe. HETU_BATCH_LINGER_S=0 for the A-B
         # baseline (opt#1-only).
-        linger_s = float(_os.environ.get("HETU_BATCH_LINGER_S", 2.0))
+        # §8.47 opt#2b: linger re-enabled DEFAULT-ON 1.5s — now SAFE
+        # because (a) the VRAM-aware cap prevents the OOM and (b) the
+        # linger is adaptive (stops the instant a poll yields no new
+        # same-shape req, so no low-load latency tax). HETU_BATCH_LINGER_S=0
+        # for the A-B baseline (opt#1-only).
+        linger_s = float(_os.environ.get("HETU_BATCH_LINGER_S", 1.5))
         self._serial = SerialModelDispatcher(
             _bind,
             _execute,
@@ -744,6 +763,7 @@ class AsyncServingEngine:
             shape_fn=_shape_fn,
             execute_batch_fn=_execute_batch,
             batch_linger_s=linger_s,
+            batch_cap_fn=_batch_cap_fn,
         )
         self._serial.start()
         logger.info(
