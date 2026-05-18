@@ -1,7 +1,13 @@
-# Hetu Benchmark — methodology (v1)
+# Hetu Benchmark — methodology (v2, latency-only)
 
-The complete UX/SLO-centric benchmark for Hetu-DiT as a **multimodel
-serving system under industrial high-concurrency + load imbalance**.
+A **LATENCY benchmark** for Hetu-DiT as a multimodel serving system
+under **real industrial high-concurrency + load-imbalance traffic**. It
+answers one question: where does the time go and how slow is it (across
+ALL latency — e2e, queueing, model-switch/cold-start tax, inference,
+time-to-first-result, tail, jitter) under realistic load. Robustness
+(no crash/OOM/starvation) is a **binary GATE only**, never scored —
+a crashed run has no trustworthy latency. v2 supersedes the v1 framing
+that wrongly weighted robustness into the score.
 `scripts/hetu_benchmark.py` is the single runnable artifact; this file
 is the rationale and the run book.
 
@@ -70,20 +76,17 @@ give authoritative per-request truth — **no dependence on the §8.41-buggy
 - **burst** — BurstGPT-style Gamma arrivals (shape α = burstiness,
   `--skew` heavy-model probability), seeded/reproducible.
 
-## 4. Hetu Latency Score (0–100) — latency only, robustness is a GATE
+## 4. Hetu Latency Score (0–100, v2) — latency only; robustness is a GATE
 
-The score IS latency quality. Robustness (no OOM / no collapse /
-starvation-freedom / fairness) is a **binary GATE only**: any scenario
-verdict==FAIL invalidates the run (score = INVALID) — you cannot trust a
-latency number from a server that didn't stay up. When the gate passes:
-
-`55·SLO-attainment + 30·latency-knee(rps@p99≤10s, /1.0) +
-15·tail-predictability(1/(p99÷p50 spread))`.
-
-All three terms are latency-derived; throughput/fairness/graceful are
-NOT weighted in. The headline output is the **latency-vs-load curve**
-(e2e p99 swept over offered load) + the per-scenario / per-model e2e
-p50/p95/p99 with queue-vs-service decomposition.
+`55·SLO-attainment(industrial) + 30·latency-knee(rps@p99≤10s) +
+15·jitter-predictability(1/(p99÷p50))`. All latency-derived. If the
+robustness GATE fails (any model starved 0-done / mass failure) the
+score is **INVALID** — you cannot trust a latency number from a server
+that didn't stay up. Headline output: the **latency-vs-load curve** with
+the e2e/queue/switch/infer p50/p99 at each offered RPS, the latency
+knee, the decomposition shares (which of queue/switch/infer dominates),
+and per reference traffic condition the **switch-induced e2e p95 delta
+vs the same-model baseline** (how much multimodel switching costs).
 
 ## 5. Run it — anytime
 

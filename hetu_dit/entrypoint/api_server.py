@@ -588,6 +588,10 @@ async def task_timeline():
             "task_id": h.task_id, "model_id": h.model_id,
             "submit_ts": h.submit_ts, "start_ts": h.start_ts,
             "done_ts": h.done_ts, "ok": h.ok,
+            # authoritative per-request service-phase decomposition:
+            "bind_s": getattr(h, "bind_s", None),     # model-switch tax
+            "infer_s": getattr(h, "infer_s", None),   # pure inference
+            "switched": getattr(h, "switched", None),
         })
     return {"ready": True, "handles": out}
 

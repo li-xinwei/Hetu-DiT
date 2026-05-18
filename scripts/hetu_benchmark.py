@@ -1,95 +1,91 @@
 #!/usr/bin/env python3
-"""Hetu Benchmark — the complete UX/SLO-centric multimodel serving
-load-imbalance benchmark for Hetu-DiT.  HETU_BENCH_VERSION = 1.
+"""Hetu Benchmark v2 — industrial-scenario LATENCY benchmark for the
+Hetu-DiT multimodel serving system.  HETU_BENCH_VERSION = 2.
 
-WHY THIS EXISTS — LATENCY IS THE SUBJECT
-----------------------------------------
-This benchmark measures ONE thing: the serving LATENCY a user feels
-under industrial high-concurrency + load imbalance. Everything else
-(no-crash / no-OOM / no-starvation / no-collapse) is only a PASS/FAIL
-GATE — a run that crashes can't have meaningful latency, but "didn't
-crash" is NOT the score. The score is latency.
+ONE QUESTION
+------------
+Under REAL industrial high-concurrency + load-imbalance traffic, where
+does the time go and how slow is it — i.e. across all the latency that
+matters, is multimodel serving (with its model switching) fast or slow?
 
-The LATENCY measurements (industry/academic basis in HETU_BENCHMARK.md —
-DistServe/Clockwork/InferFair/DiffServe/MoDM/BurstGPT/Anyscale/NVIDIA):
+This benchmark is LATENCY, broadly construed. It does NOT score
+robustness — "didn't crash / didn't OOM / didn't starve" is only a
+binary GATE (a crashed run has no trustworthy latency). The output is a
+full latency profile + decomposition + latency-vs-load curves under
+realistic industrial workloads.
 
-  1. e2e LATENCY DISTRIBUTION p50/p95/p99/max — the number the user
-     feels; mean is banned (a 200ms mean hides a 3s p99).
-  2. LATENCY DECOMPOSITION  e2e = queue (waiting behind others)
-     + service (model-switch tax + inference). Attributes WHERE the
-     latency goes — the multimodel-specific part is the switch tax.
-  3. LATENCY-vs-LOAD CURVE (the headline): e2e p99 swept over offered
-     load → the latency knee (max rps keeping p99 interactive) and how
-     steeply latency degrades past it.
-  4. PER-MODEL latency under skew — the cold/rare model's latency
-     penalty vs the hot model (load-imbalance's UX impact).
-  5. SWITCH / COLD-START TAX — model-swap wall time (measured: hot 0s,
-     sd3↔flux 6–9s) and how often it lands on the critical path.
-  6. SLO-attainment / goodput@SLO — % of requests whose e2e met their
-     latency target (latency expressed as a UX pass-rate).
-  7. TAIL PREDICTABILITY p99/p50 ratio (Clockwork: users hate variance).
+LATENCY DIMENSIONS (all per-request authoritative via /task_timeline,
+which now carries bind_s/infer_s — no /status, no log scraping):
 
-GATES (binary, NOT scored — a failure invalidates the latency result):
-no OOM, no collapse, every model with demand makes progress
-(starvation-freedom), fairness not pathological.
+  e2e      = done − submit        what the user actually waits
+  queue    = start − submit       waiting behind concurrent load
+  switch   = bind_s               model-switch / cold-start tax
+  infer    = infer_s              pure inference
+  (queue + switch + infer ≈ e2e — the decomposition that says WHERE
+   industrial-load latency goes; switch is the multimodel-specific part)
 
-It AGGREGATES every prior finding (context.md §8.30–§8.43): the
-deterministic load-imbalance taxonomy (A skew / B temporal / C
-work-size / D switch / E multi-GPU / F SLO-fairness), the measured
-switch cost (hot 0s, sd3->flux ~9s, flux->sd3 ~6s), the OOM root cause
-+ fix (#5/#5b structural teardown), and the scheduler-v2 fairness fix.
+Reported per model and global: p50/p95/p99/max of EACH of the four;
+time-to-first-result; jitter (p99/p50, IQR); the mean decomposition
+shares (queue% / switch% / infer%) → the dominant latency contributor;
+switch-tax stats (freq, mean/p95 bind among switched, % of total
+latency spent switching); and every one of these swept over offered
+load (the latency-vs-load curve family).
 
-AUTHORITATIVE MEASUREMENT
--------------------------
-No dependence on the §8.41-buggy /status PNG-glob. Per-request truth
-comes from /task_timeline (dispatcher TaskHandle submit/start/done) and
-/dispatch_stats (counters). e2e=done-submit, queue=start-submit,
-service=done-start. Optional server-side SWITCHCOST join splits service
-into bind(switch) vs infer when run on the server box.
+WORKLOAD = realistic industrial traffic (not synthetic robustness gates,
+not per-user probes):
 
-RUN ANYTIME (self-contained: stdlib + requests)
------------------------------------------------
-  # 1. regression — deterministic taxonomy, per-scenario drain-isolated
-  python3 scripts/hetu_benchmark.py --base-url http://localhost:8000 \
-      --mode taxonomy --out-dir ~/hetu_bench
-  # 2. capacity — goodput@SLO vs offered-load sweep (the knee)
-  python3 scripts/hetu_benchmark.py --mode capacity \
-      --rates 0.05,0.1,0.2,0.4,0.8 --out-dir ~/hetu_bench
-  # 3. realistic — Gamma-burst stochastic (BurstGPT-style), seeded
-  python3 scripts/hetu_benchmark.py --mode burst \
-      --rate 0.3 --burst-alpha 0.4 --skew 0.9 --out-dir ~/hetu_bench
-  # 4. everything + composite Hetu Score
-  python3 scripts/hetu_benchmark.py --mode all --out-dir ~/hetu_bench
-  # one-command provisioned real-hardware run:
-  bash scripts/run_hetu_benchmark.sh        # see that script
+  • industrial : Gamma-burst arrivals (shape α = burstiness / CV,
+    BurstGPT-Azure-style; smaller α = burstier), configurable
+    multi-model demand skew, mixed resolution/steps, sustained high
+    concurrency. The primary workload.
+  • sweep      : the above swept across offered RPS → latency-vs-load
+    curves + the latency knee (max RPS keeping p99 interactive) and how
+    steeply each latency component degrades past it.
+  • refpoints  : a few FIXED industrial traffic conditions (steady
+    skew / cold-model burst / heavy-model hog) as deterministic,
+    version-comparable reference points — measured for LATENCY, with a
+    same-model baseline so the switch-induced delta is explicit.
+
+Basis: DistServe/Clockwork/InferFair/DiffServe/MoDM/BurstGPT/Anyscale/
+NVIDIA (see HETU_BENCHMARK.md). Self-contained (stdlib + requests),
+deterministic (fixed seeds), runnable anytime
+(`bash scripts/run_hetu_benchmark.sh`).  HETU_BENCH_VERSION = 2.
 """
-import argparse, json, math, os, random, threading, time
+import argparse, json, os, random, threading, time
 import requests
 
-HETU_BENCH_VERSION = 1
+HETU_BENCH_VERSION = 2
 PROMPT = "A futuristic cityscape at golden hour, highly detailed"
 
-# ---- SLO policy (configurable; defaults are defensible diffusion tiers).
-# A request's SLO is a function of its compute size (resolution*steps),
-# because users tolerate longer for bigger asks. interactive vs relaxed
-# classes per the literature (NVIDIA/Anyscale; DiffServe SLO-violation).
-def slo_for(w, h, steps, scale=1.0):
-    """Return (slo_s, slo_class). Tunable via --slo-scale."""
-    units = (w * h) / (512 * 512) * (steps / 20.0)
-    if units <= 1.2:                       # ~512^2/20  -> interactive
-        return 12.0 * scale, "interactive"
-    if units <= 3.0:                       # ~768^2/20  -> standard
-        return 25.0 * scale, "standard"
-    return 60.0 * scale, "relaxed"         # >=1024^2 / many steps
-
-
-# ---- model/size shorthands (single-40GB-resident sizes) -------------
 SD = ("sd3", 512, 512, 20)
 SDb = ("sd3", 768, 768, 20)
 SDB = ("sd3", 1024, 1024, 28)
-SDH = ("sd3", 1536, 1536, 50)
 FX = ("flux", 512, 512, 20)
 FXB = ("flux", 1024, 1024, 50)
+
+
+def slo_for(w, h, steps, scale=1.0):
+    units = (w * h) / (512 * 512) * (steps / 20.0)
+    if units <= 1.2:
+        return 12.0 * scale
+    if units <= 3.0:
+        return 25.0 * scale
+    return 60.0 * scale
+
+
+def _gamma(rate, alpha, skew, dur, seed, sizes):
+    """BurstGPT-style Gamma inter-arrivals. rate=mean rps, alpha=shape
+    (smaller=burstier/higher CV), skew=P(heavy model)."""
+    rng = random.Random(seed)
+    out, t = [], 0.0
+    scale = (1.0 / rate) / alpha
+    while t < dur:
+        t += rng.gammavariate(alpha, scale)
+        if t >= dur:
+            break
+        out.append((round(t, 3), *(sizes[0] if rng.random() < skew
+                                   else sizes[1])))
+    return out
 
 
 def _steady(m, period, dur, t0=0.0):
@@ -104,115 +100,24 @@ def _burst(m, at, n, sp=0.1):
     return [(round(at + k * sp, 3), *m) for k in range(n)]
 
 
-def _gamma_arrivals(rate, alpha, skew, dur, seed, models):
-    """BurstGPT-style: Gamma inter-arrivals (shape alpha; small alpha =
-    burstier, higher CV). model chosen by `skew` (P(heavy model))."""
-    rng = random.Random(seed)
-    out, t = [], 0.0
-    heavy, light = models[0], models[1] if len(models) > 1 else models[0]
-    scale = (1.0 / rate) / alpha          # mean inter-arrival = 1/rate
-    while t < dur:
-        t += rng.gammavariate(alpha, scale)
-        if t >= dur:
-            break
-        m = heavy if rng.random() < skew else light
-        spec = SD if m == "sd3" else FX
-        out.append((round(t, 3), *spec))
-    return out
-
-
-# ---- deterministic load-imbalance taxonomy (the regression core) ----
-def taxonomy():
-    S = {}
-    S["A1_steady_skew"] = dict(
-        desc="sd3 ~95% steady + flux ~5% trickle (18:1 industrial skew)",
-        arr=_steady(SD, 1.0, 60) + _steady(FX, 20.0, 60),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1 and d.get("sd3", 0) >= 1,
-                              "rare model not starved under steady skew"))
-    S["A2_cold_burst"] = dict(
-        desc="sd3 steady; flux silent 25s then 8-burst",
-        arr=_steady(SDb, 2.0, 60) + _burst(FX, 25.0, 8, 0.12),
-        gate=lambda d, a, x: (d.get("flux", 0) >= max(1, int(.75*a.get("flux", 1))),
-                              ">=75% of the flux cold-burst completes"))
-    S["A3_gpu_hog"] = dict(
-        desc="sd3 1024²/28 saturating GPU; flux 1/16s trickle",
-        arr=_steady(SDB, 4.0, 48) + _steady(FX, 16.0, 48, 6.0),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1,
-                              "rare model not starved while heavy hogs GPU"))
-    S["A4_hotset_shift"] = dict(
-        desc="popular model flips at t=30s (flux-heavy -> sd3-heavy)",
-        arr=_steady(FX, 1.2, 30) + _steady(SD, 12.0, 30)
-        + _steady(SD, 1.2, 60, 30.0) + _steady(FX, 12.0, 60, 30.0),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1 and d.get("sd3", 0) >= 1,
-                              "adapts across the popularity flip"))
-    S["A5_zipf_longtail"] = dict(
-        desc="Zipf model popularity + irregular inter-arrival (seed42)",
-        arr=_gamma_arrivals(0.8, 0.7, 0.8, 60, 42, ["sd3", "flux"]),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1 and d.get("sd3", 0) >= 1,
-                              "no thrash-collapse; both progress"))
-    S["B1_flash_crowd"] = dict(
-        desc="sd3 baseline; flux 10× spike 20-30s",
-        arr=_steady(SD, 3.0, 50) + _burst(FX, 20.0, 20, 0.5),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1 and not x["oom"],
-                              "spike absorbed gracefully, no wedge/OOM"))
-    S["B3_sync_burst"] = dict(
-        desc="sd3 & flux each 6-burst at the same instant",
-        arr=_burst(SD, 10.0, 6, 0.05) + _burst(FX, 10.0, 6, 0.05),
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1 and d.get("sd3", 0) >= 1,
-                              "no deadlock on simultaneous switch demand"))
-    S["B4_idle_then_hit"] = dict(
-        desc="req at 0, idle 40s, req at 40 (scale-to-zero cold path)",
-        arr=[(0.0, *SD), (40.0, *FX)],
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1,
-                              "post-idle cold-path request completes"))
-    c1 = [(round(i*2.0, 3), *(SDB if i % 6 == 0 else SD)) for i in range(18)]
-    S["C1_res_step_mix"] = dict(
-        desc="sd3 512²/20 stream + a 1024²/28 every 6th (head-of-line)",
-        arr=c1,
-        gate=lambda d, a, x: (d.get("sd3", 0) >= int(.5*a.get("sd3", 1)),
-                              ">=50% served despite huge HoL jobs"))
-    S["C2_cheap_vs_costly"] = dict(
-        desc="cheap sd3 1/s + costly flux 1024²/50 every 18s",
-        arr=_steady(SD, 1.0, 50) + [(round(10+k*18.0, 3), *FXB)
-                                    for k in range(3)],
-        gate=lambda d, a, x: (d.get("sd3", 0) >= 1 and d.get("flux", 0) >= 1,
-                              "cheap stream flows around costly jobs"))
-    S["D1_alternate"] = dict(
-        desc="strict sd3/flux alternation -> switch every request",
-        arr=[(round(i*1.5, 3), *(SD if i % 2 == 0 else FX))
-             for i in range(20)],
-        gate=lambda d, a, x: ((d.get("sd3", 0)+d.get("flux", 0)) >= 1
-                              and not x["oom"],
-                              "progresses, NO cumulative OOM (§8.40/41 gate)"))
-    d2, t, i = [], 0.0, 0
-    for per in (6, 5, 4, 3, 2, 1):
-        for _ in range(4):
-            d2.append((round(t, 3), *(SD if i % 2 == 0 else FX)))
-            t += per
-            i += 1
-    S["D2_thrash_sweep"] = dict(
-        desc="switch interval 6s->1s (find goodput-collapse onset)",
-        arr=d2, gate=lambda d, a, x: (True,
-                                      "REPORT goodput/collapse-onset"))
-    S["F2_starvation_free"] = dict(
-        desc="extreme ~50:1 sd3:flux — the canonical fairness HARD GATE",
-        arr=_steady(SD, 0.8, 40) + [(20.0, *FX)],
-        gate=lambda d, a, x: (d.get("flux", 0) >= 1,
-                              "HARD GATE: the single rare req completed"))
-    S["E1_idle_executor"] = dict(
-        desc="[>=2 GPU only] executor pinned to sd3 idle while flux queues",
-        arr=_steady(SD, 1.0, 40) + _steady(FX, 1.0, 40),
-        gate=lambda d, a, x: (True, "SKIP unless --multi-gpu"),
-        multi_gpu=True)
-    return S
-
-
-# ---- authoritative measurement via /task_timeline + /dispatch_stats -
-def _get(base, path, to=10):
-    try:
-        return requests.get(f"{base}{path}", timeout=to).json()
-    except Exception:  # noqa: BLE001
-        return {}
+# fixed industrial reference traffic conditions (deterministic) + the
+# same-model baseline companion so the switch-induced latency delta is
+# explicit ("how much did multimodel switching cost vs one model").
+def refpoints():
+    return {
+        "steady_skew": dict(
+            desc="industrial 18:1 demand skew, sustained",
+            arr=_steady(SD, 1.0, 60) + _steady(FX, 20.0, 60),
+            base=_steady(SD, 1.0, 60)),                       # sd3-only
+        "cold_burst": dict(
+            desc="rare model silent then sudden 8-burst amid steady load",
+            arr=_steady(SDb, 2.0, 60) + _burst(FX, 25.0, 8, 0.12),
+            base=_steady(SDb, 2.0, 60)),
+        "heavy_hog": dict(
+            desc="heavy 1024² model saturates GPU; light model trickles",
+            arr=_steady(SDB, 4.0, 48) + _steady(FX, 16.0, 48, 6.0),
+            base=_steady(SDB, 4.0, 48)),
+    }
 
 
 def gen(base, m, w, h, st, seed, rid):
@@ -224,21 +129,18 @@ def gen(base, m, w, h, st, seed, rid):
     return r.json()["task_id"]
 
 
+def _get(base, path, to=10):
+    try:
+        return requests.get(f"{base}{path}", timeout=to).json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _pct(xs, q):
     if not xs:
         return float("nan")
     s = sorted(xs)
-    return s[min(len(s) - 1, int(q * len(s)))]
-
-
-def _jain(vals):
-    """Jain's fairness index over per-model SLO-attainment (1.0 = fair)."""
-    v = [x for x in vals if x is not None]
-    if not v:
-        return 1.0
-    s = sum(v)
-    sq = sum(x * x for x in v)
-    return (s * s) / (len(v) * sq) if sq > 0 else 1.0
+    return round(s[min(len(s) - 1, int(q * len(s)))], 3)
 
 
 def drain(base, max_wait):
@@ -252,7 +154,6 @@ def drain(base, max_wait):
 
 
 def fire_all(base, arrivals, tag):
-    """Open-loop fire by schedule; returns {task_id: submit_wall}."""
     sub, lock, t0 = {}, threading.Lock(), time.time()
 
     def fire(i, off, m, w, h, st):
@@ -265,291 +166,243 @@ def fire_all(base, arrivals, tag):
         except Exception as e:  # noqa: BLE001
             print(f"SEND_FAIL {tag}-{i}: {e}", flush=True)
 
-    ths = [threading.Thread(target=fire, args=(i, *a[:1], *a[1:]),
+    ths = [threading.Thread(target=fire,
+                            args=(i, a[0], a[1], a[2], a[3], a[4]),
                             daemon=True)
            for i, a in enumerate(sorted(arrivals))]
     for t in ths:
         t.start()
     while any(t.is_alive() for t in ths):
         time.sleep(0.5)
-    return sub
+    return sub, t0
 
 
-def metrics(base, sub, slo_scale):
-    """Compute the full UX/SLO metric block from /task_timeline."""
+def latency_profile(base, sub, t0, slo_scale):
+    """Full per-request latency decomposition from /task_timeline."""
     tl = {h["task_id"]: h for h in _get(base, "/task_timeline").get(
         "handles", [])}
+    glob = {"e2e": [], "queue": [], "switch": [], "infer": [], "slo_ok": 0,
+            "slo_n": 0, "switched": 0, "first_done": None}
     perm = {}
-    e2e_all = []
     for tid, (m, w, h, st) in sub.items():
-        rec = perm.setdefault(m, {"n": 0, "done": 0, "e2e": [], "queue": [],
-                                  "svc": [], "slo_ok": 0, "slo_n": 0})
-        rec["n"] += 1
+        pm = perm.setdefault(m, {"n": 0, "done": 0, "e2e": [], "queue": [],
+                                 "switch": [], "infer": [], "slo_ok": 0})
+        pm["n"] += 1
         t = tl.get(tid)
         if not t or t.get("done_ts") is None or not t.get("ok"):
             continue
         e2e = t["done_ts"] - t["submit_ts"]
         q = (t["start_ts"] - t["submit_ts"]) if t.get("start_ts") else 0.0
-        svc = (t["done_ts"] - t["start_ts"]) if t.get("start_ts") else e2e
-        slo_s, _cls = slo_for(w, h, st, slo_scale)
-        rec["done"] += 1
-        rec["e2e"].append(e2e)
-        rec["queue"].append(q)
-        rec["svc"].append(svc)
-        rec["slo_n"] += 1
-        rec["slo_ok"] += 1 if e2e <= slo_s else 0
-        e2e_all.append(e2e)
-    return perm, e2e_all
+        sw = t.get("bind_s") or 0.0
+        inf = t.get("infer_s")
+        if inf is None:                       # fall back if not recorded
+            inf = max(0.0, (t["done_ts"] - (t["start_ts"] or t["submit_ts"]))
+                      - sw)
+        pm["done"] += 1
+        for k, v in (("e2e", e2e), ("queue", q), ("switch", sw),
+                     ("infer", inf)):
+            pm[k].append(v)
+            glob[k].append(v)
+        ok = e2e <= slo_for(w, h, st, slo_scale)
+        pm["slo_ok"] += int(ok)
+        glob["slo_ok"] += int(ok)
+        glob["slo_n"] += 1
+        glob["switched"] += 1 if t.get("switched") else 0
+        fd = t["done_ts"] - t0
+        if glob["first_done"] is None or fd < glob["first_done"]:
+            glob["first_done"] = round(fd, 3)
+    return glob, perm
 
 
-def summarize(perm, e2e_all, elapsed):
-    """Aggregate -> the headline UX numbers + Jain fairness."""
-    tot_done = sum(r["done"] for r in perm.values())
-    tot_n = sum(r["n"] for r in perm.values())
-    slo_ok = sum(r["slo_ok"] for r in perm.values())
-    goodput = round(slo_ok / elapsed, 4) if elapsed > 0 else 0.0
-    attain = (slo_ok / tot_done) if tot_done else 0.0
-    per_attain = []
-    pm = {}
-    for m, r in sorted(perm.items()):
-        a = (r["slo_ok"] / r["done"]) if r["done"] else 0.0
-        per_attain.append(a if r["n"] else None)
-        pm[m] = {
-            "n": r["n"], "done": r["done"],
-            "complete_ratio": round(r["done"]/r["n"], 3) if r["n"] else 1.0,
-            "slo_attain": round(a, 3),
-            "e2e_p50": round(_pct(r["e2e"], .5), 2),
-            "e2e_p95": round(_pct(r["e2e"], .95), 2),
-            "e2e_p99": round(_pct(r["e2e"], .99), 2),
-            "queue_p95": round(_pct(r["queue"], .95), 2),
-            "svc_p50": round(_pct(r["svc"], .5), 2),
-        }
-    return {
-        "throughput_rps": round(tot_done / elapsed, 4) if elapsed else 0,
-        "goodput_at_slo_rps": goodput,
-        "slo_attainment": round(attain, 3),
-        "completed": tot_done, "admitted": tot_n,
-        "e2e_p50": round(_pct(e2e_all, .5), 2),
-        "e2e_p95": round(_pct(e2e_all, .95), 2),
-        "e2e_p99": round(_pct(e2e_all, .99), 2),
-        "e2e_max": round(max(e2e_all), 2) if e2e_all else float("nan"),
-        "tail_ratio_p99_p50": round(
-            _pct(e2e_all, .99) / _pct(e2e_all, .5), 2)
-            if e2e_all and _pct(e2e_all, .5) > 0 else float("nan"),
-        "fairness_jain": round(_jain(per_attain), 3),
-        "min_per_model_complete": round(
-            min((p["complete_ratio"] for p in pm.values()), default=1.0), 3),
-        "per_model": pm,
+def _dist(xs):
+    return {"p50": _pct(xs, .5), "p95": _pct(xs, .95),
+            "p99": _pct(xs, .99),
+            "max": round(max(xs), 3) if xs else float("nan"),
+            "mean": round(sum(xs) / len(xs), 3) if xs else float("nan")}
+
+
+def summarize(glob, perm, elapsed):
+    done = sum(p["done"] for p in perm.values())
+    n = sum(p["n"] for p in perm.values())
+    e2e = glob["e2e"]
+    tot = sum(glob["e2e"]) or 1.0
+    out = {
+        "completed": done, "admitted": n,
+        "throughput_rps": round(done / elapsed, 4) if elapsed else 0,
+        "time_to_first_result_s": glob["first_done"],
+        "slo_attainment": round(glob["slo_ok"] / done, 3) if done else 0.0,
+        "goodput_at_slo_rps": round(glob["slo_ok"] / elapsed, 4)
+        if elapsed else 0.0,
+        "e2e": _dist(glob["e2e"]), "queue": _dist(glob["queue"]),
+        "switch": _dist(glob["switch"]), "infer": _dist(glob["infer"]),
+        "jitter_p99_over_p50": round(
+            _pct(e2e, .99) / _pct(e2e, .5), 2)
+        if e2e and _pct(e2e, .5) else float("nan"),
+        "decomposition_share": {
+            "queue_pct": round(100 * sum(glob["queue"]) / tot, 1),
+            "switch_pct": round(100 * sum(glob["switch"]) / tot, 1),
+            "infer_pct": round(100 * sum(glob["infer"]) / tot, 1)},
+        "switch_freq_pct": round(
+            100 * glob["switched"] / done, 1) if done else 0.0,
+        "per_model": {m: {
+            "done": f"{p['done']}/{p['n']}",
+            "e2e": _dist(p["e2e"]), "queue_p95": _pct(p["queue"], .95),
+            "switch_p95": _pct(p["switch"], .95),
+            "infer_p50": _pct(p["infer"], .5),
+            "slo_attain": round(p["slo_ok"] / p["done"], 3)
+            if p["done"] else 0.0}
+            for m, p in sorted(perm.items())},
     }
+    dom = max(out["decomposition_share"].items(), key=lambda kv: kv[1])
+    out["dominant_latency"] = dom[0].replace("_pct", "")
+    return out
 
 
-def run_taxonomy(base, out_dir, drain_s, slo_scale, multi_gpu, only):
-    S = taxonomy()
-    ids = only or [k for k in S if not S[k].get("multi_gpu") or multi_gpu]
-    results = []
-    for sid in ids:
-        if sid not in S:
-            print(f"unknown {sid}")
-            continue
-        sp = S[sid]
-        if sp.get("multi_gpu") and not multi_gpu:
-            print(f"[{sid}] SKIP (needs --multi-gpu)", flush=True)
-            results.append({"scenario": sid, "skipped": True})
-            continue
-        arr = sp["arr"]
-        arr_by = {}
-        for a in arr:
-            arr_by[a[1]] = arr_by.get(a[1], 0) + 1
-        print(f"\n=== {sid} (n={len(arr)}) :: {sp['desc']} ===", flush=True)
-        s0 = _get(base, "/dispatch_stats").get("stats", {}) or {}
-        f0 = s0.get("failed", 0)
-        oom0 = _get(base, "/dispatch_stats")  # cheap; oom via failed proxy
-        t0 = time.time()
-        sub = fire_all(base, arr, sid)
-        drained, waited = drain(base, drain_s)
-        elapsed = time.time() - t0
-        perm, e2e = metrics(base, sub, slo_scale)
-        summ = summarize(perm, e2e, elapsed)
-        s1 = _get(base, "/dispatch_stats").get("stats", {}) or {}
-        failed = s1.get("failed", 0) - f0
-        served = {m: perm.get(m, {}).get("done", 0) for m in arr_by}
-        x = {"failed": failed,
-             "oom": failed > 0.5 * max(1, sum(served.values()))}
-        ok, why = sp["gate"](served, arr_by, x)
-        verdict = "PASS" if ok else "FAIL"
-        print(f"[{sid}] {verdict} served={served}/{arr_by} "
-              f"goodput@SLO={summ['goodput_at_slo_rps']}rps "
-              f"attain={summ['slo_attainment']} jain={summ['fairness_jain']} "
-              f"e2e_p95={summ['e2e_p95']}s p99={summ['e2e_p99']}s "
-              f"drained={drained}({waited}s) failed={failed}\n"
-              f"  gate: {why}", flush=True)
-        results.append({"scenario": sid, "verdict": verdict, "gate": why,
-                         "arrivals": arr_by, "metrics": summ})
-    return results
+def gate_ok(perm):
+    """Binary GATE only: every model with demand made progress + no
+    mass-failure. A failed gate => latency numbers are untrustworthy."""
+    for m, p in perm.items():
+        if p["n"] > 0 and p["done"] == 0:
+            return False, f"starvation: {m} 0/{p['n']}"
+    return True, "ok"
 
 
-def run_capacity(base, out_dir, rates, slo_scale, dur, drain_s):
-    """Rate-sweep -> goodput@SLO vs offered load (the capacity knee)."""
-    curve = []
-    for rate in rates:
-        arr = _gamma_arrivals(rate, 0.5, 0.85, dur, 42, ["sd3", "flux"])
-        print(f"\n=== capacity rate={rate}rps n={len(arr)} "
-              f"(Gamma α=0.5 burst, 85:15 skew) ===", flush=True)
-        t0 = time.time()
-        sub = fire_all(base, arr, f"cap{rate}")
-        drained, waited = drain(base, drain_s)
-        elapsed = time.time() - t0
-        perm, e2e = metrics(base, sub, slo_scale)
-        summ = summarize(perm, e2e, elapsed)
-        offered = round(len(arr) / dur, 3)
-        curve.append({"rate": rate, "offered_rps": offered,
-                      "goodput_at_slo_rps": summ["goodput_at_slo_rps"],
-                      "slo_attainment": summ["slo_attainment"],
-                      "e2e_p99": summ["e2e_p99"],
-                      "fairness_jain": summ["fairness_jain"]})
-        print(f"  offered={offered} goodput@SLO="
-              f"{summ['goodput_at_slo_rps']} attain={summ['slo_attainment']}"
-              f" p99={summ['e2e_p99']}s", flush=True)
-    # capacity = max offered with attainment >= 0.99; degradation class
-    knee = max((c["offered_rps"] for c in curve
-                if c["slo_attainment"] >= 0.99), default=0.0)
-    gp = [c["goodput_at_slo_rps"] for c in curve]
-    collapse = len(gp) >= 2 and gp[-1] < 0.5 * max(gp)
-    return {"curve": curve, "capacity_rps_at_99pct": knee,
-            "degradation": "COLLAPSE" if collapse else "GRACEFUL"}
-
-
-def hetu_score(tax, cap):
-    """LATENCY score 0-100. The score IS latency quality; robustness is
-    only a GATE. Composition (all latency-derived):
-      • 55  SLO-attainment — fraction of requests whose e2e met its
-             latency target (latency as a UX pass-rate).
-      • 30  latency-knee — offered rps still keeping p99 interactive,
-             normalized (capacity at which latency stays good).
-      • 15  tail predictability — 1/(p99÷p50 spread) (Clockwork).
-    GATE: if any robustness gate fails (a scenario verdict==FAIL =
-    crash/OOM/starvation/collapse), the latency result is INVALID and
-    the score is reported as 0 with gate_failed=True — you cannot trust
-    a latency number from a run that didn't stay up."""
-    graded = [r for r in tax if not r.get("skipped")]
-    if not graded:
-        return 0.0, {"gate_failed": True, "reason": "no graded scenarios"}
-    gate_fail = [r["scenario"] for r in graded if r["verdict"] == "FAIL"]
-    attn = sum(r["metrics"]["slo_attainment"] for r in graded) / len(graded)
-    tails = [r["metrics"]["tail_ratio_p99_p50"] for r in graded
-             if isinstance(r["metrics"]["tail_ratio_p99_p50"], (int, float))
-             and r["metrics"]["tail_ratio_p99_p50"] == r["metrics"][
-                 "tail_ratio_p99_p50"]]
-    tailpred = max(0.0, 1.0 - (sum(tails)/len(tails) - 1) / 9) if tails else 1
-    # latency-knee: rps at which p99 still <= 10s (interactive), /1.0 cap
-    knee = 0.0
-    if cap:
-        good = [c["offered_rps"] for c in cap.get("curve", [])
-                if c.get("e2e_p99", 1e9) <= 10.0]
-        knee = max(good) if good else 0.0
-    knee_n = min(1.0, knee / 1.0)        # 1.0 rps p99<=10s == full marks
-    parts = {
-        "slo_attainment": round(attn, 3),
-        "latency_knee_rps_p99_le_10s": round(knee, 3),
-        "tail_predictability": round(tailpred, 3),
-        "gate_failed": bool(gate_fail),
-        "gate_failures": gate_fail,
-    }
-    if gate_fail:
-        return 0.0, parts          # invalid latency result — gated out
-    score = 55 * attn + 30 * knee_n + 15 * tailpred
-    return round(score, 1), parts
+def run_industrial(base, tag, arr, drain_s, slo_scale):
+    print(f"\n=== {tag} (n={len(arr)}) ===", flush=True)
+    sub, t0 = fire_all(base, arr, tag)
+    drained, waited = drain(base, drain_s)
+    elapsed = time.time() - t0
+    glob, perm = latency_profile(base, sub, t0, slo_scale)
+    s = summarize(glob, perm, elapsed)
+    s["drained"], s["drain_wait_s"] = drained, waited
+    ok, why = gate_ok(perm)
+    s["gate_ok"], s["gate"] = ok, why
+    e = s["e2e"]
+    d = s["decomposition_share"]
+    print(f"  e2e p50={e['p50']}s p95={e['p95']}s p99={e['p99']}s "
+          f"max={e['max']}s | ttfr={s['time_to_first_result_s']}s | "
+          f"jitter={s['jitter_p99_over_p50']}", flush=True)
+    print(f"  decomp: queue {d['queue_pct']}% / switch {d['switch_pct']}% "
+          f"/ infer {d['infer_pct']}%  -> dominant={s['dominant_latency']} "
+          f"| switch_freq={s['switch_freq_pct']}%  gate={why}", flush=True)
+    return s
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://localhost:8000")
-    ap.add_argument("--mode", default="taxonomy",
-                    choices=["taxonomy", "capacity", "burst", "all"])
-    ap.add_argument("--only", default="", help="comma scenario ids")
+    ap.add_argument("--mode", default="all",
+                    choices=["industrial", "sweep", "refpoints", "all"])
     ap.add_argument("--out-dir", default="/tmp/hetu_bench")
-    ap.add_argument("--drain-s", type=float, default=240.0)
-    ap.add_argument("--slo-scale", type=float, default=1.0,
-                    help="multiply all SLO thresholds (tighten/loosen)")
-    ap.add_argument("--rates", default="0.05,0.1,0.2,0.4,0.8")
+    ap.add_argument("--drain-s", type=float, default=200.0)
+    ap.add_argument("--slo-scale", type=float, default=1.0)
     ap.add_argument("--rate", type=float, default=0.3)
-    ap.add_argument("--burst-alpha", type=float, default=0.4)
-    ap.add_argument("--skew", type=float, default=0.9)
+    ap.add_argument("--alpha", type=float, default=0.4,
+                    help="Gamma shape: smaller = burstier (CV up)")
+    ap.add_argument("--skew", type=float, default=0.85,
+                    help="P(heavy model) — demand imbalance")
     ap.add_argument("--dur", type=float, default=60.0)
-    ap.add_argument("--multi-gpu", action="store_true")
+    ap.add_argument("--rates", default="0.05,0.1,0.2,0.4,0.8")
     a = ap.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
-    only = [s.strip() for s in a.only.split(",") if s.strip()]
     if not _get(a.base_url, "/dispatch_stats").get("ready"):
-        print("note: /dispatch_stats not armed yet — first requests will "
-              "lazy-init the dispatcher.", flush=True)
-    report = {"hetu_bench_version": HETU_BENCH_VERSION, "mode": a.mode}
+        print("note: dispatcher lazy-inits on first request.", flush=True)
+    rep = {"hetu_bench_version": HETU_BENCH_VERSION, "mode": a.mode}
+    sizes = [SD, FX]
 
-    if a.mode in ("taxonomy", "all"):
-        report["taxonomy"] = run_taxonomy(
-            a.base_url, a.out_dir, a.drain_s, a.slo_scale, a.multi_gpu, only)
-    if a.mode in ("capacity", "all"):
-        rates = [float(x) for x in a.rates.split(",")]
-        report["capacity"] = run_capacity(
-            a.base_url, a.out_dir, rates, a.slo_scale, a.dur, a.drain_s)
-    if a.mode in ("burst", "all"):
-        arr = _gamma_arrivals(a.rate, a.burst_alpha, a.skew, a.dur, 42,
-                              ["sd3", "flux"])
-        print(f"\n=== burst rate={a.rate} α={a.burst_alpha} skew={a.skew}"
-              f" n={len(arr)} ===", flush=True)
-        t0 = time.time()
-        sub = fire_all(a.base_url, arr, "burst")
-        drain(a.base_url, a.drain_s)
-        perm, e2e = metrics(a.base_url, sub, a.slo_scale)
-        report["burst"] = summarize(perm, e2e, time.time() - t0)
-        print(f"  goodput@SLO={report['burst']['goodput_at_slo_rps']}rps "
-              f"attain={report['burst']['slo_attainment']} "
-              f"p99={report['burst']['e2e_p99']}s "
-              f"jain={report['burst']['fairness_jain']}", flush=True)
+    if a.mode in ("industrial", "all"):
+        arr = _gamma(a.rate, a.alpha, a.skew, a.dur, 42, sizes)
+        rep["industrial"] = run_industrial(
+            a.base_url, f"industrial(rate={a.rate},α={a.alpha},"
+            f"skew={a.skew})", arr, a.drain_s, a.slo_scale)
 
+    if a.mode in ("sweep", "all"):
+        curve = []
+        for rt in [float(x) for x in a.rates.split(",")]:
+            arr = _gamma(rt, 0.5, a.skew, a.dur, 42, sizes)
+            s = run_industrial(a.base_url, f"sweep@{rt}rps", arr,
+                               a.drain_s, a.slo_scale)
+            curve.append({"rate": rt, "offered_rps": round(len(arr)/a.dur, 3),
+                          "e2e_p50": s["e2e"]["p50"],
+                          "e2e_p99": s["e2e"]["p99"],
+                          "queue_p99": s["queue"]["p99"],
+                          "switch_p95": s["switch"]["p95"],
+                          "infer_p50": s["infer"]["p50"],
+                          "slo_attainment": s["slo_attainment"],
+                          "dominant": s["dominant_latency"],
+                          "gate_ok": s["gate_ok"]})
+        knee = max((c["offered_rps"] for c in curve
+                    if c["e2e_p99"] <= 10.0 and c["gate_ok"]), default=0.0)
+        rep["sweep"] = {"curve": curve, "latency_knee_rps_p99_le_10s": knee}
+
+    if a.mode in ("refpoints", "all"):
+        rp = {}
+        for name, spec in refpoints().items():
+            sw = run_industrial(a.base_url, f"ref:{name}",
+                                spec["arr"], a.drain_s, a.slo_scale)
+            bl = run_industrial(a.base_url, f"ref:{name}:baseline",
+                                spec["base"], a.drain_s, a.slo_scale)
+            delta = round(sw["e2e"]["p95"] - bl["e2e"]["p95"], 3)
+            rp[name] = {"desc": spec["desc"], "with_switching": sw,
+                        "same_model_baseline": bl,
+                        "switch_induced_e2e_p95_delta_s": delta}
+            print(f"  >> {name}: switching cost +{delta}s e2e p95 vs "
+                  f"same-model baseline", flush=True)
+        rep["refpoints"] = rp
+
+    # LATENCY score (robustness only a gate). 55 SLO-attain (industrial)
+    # + 30 latency-knee (sweep, p99<=10s rps) + 15 jitter predictability.
+    parts = {}
     if a.mode == "all":
-        score, parts = hetu_score(report.get("taxonomy", []),
-                                  report.get("capacity"))
-        report["hetu_score"] = score
-        report["hetu_score_parts"] = parts
-    json.dump(report, open(os.path.join(a.out_dir, "HETU_REPORT.json"),
-                           "w"), indent=2)
+        ind = rep.get("industrial", {})
+        gate_bad = not ind.get("gate_ok", True) or any(
+            not c["gate_ok"] for c in rep.get("sweep", {}).get("curve", []))
+        attn = ind.get("slo_attainment", 0.0)
+        knee = rep.get("sweep", {}).get("latency_knee_rps_p99_le_10s", 0.0)
+        jit = ind.get("jitter_p99_over_p50") or 99
+        jitscore = max(0.0, 1.0 - (jit - 1) / 9)
+        parts = {"slo_attainment": attn,
+                 "latency_knee_rps": knee,
+                 "jitter_predictability": round(jitscore, 3),
+                 "gate_failed": gate_bad}
+        rep["hetu_latency_score"] = (
+            0.0 if gate_bad else
+            round(55*attn + 30*min(1.0, knee/1.0) + 15*jitscore, 1))
+        rep["hetu_latency_score_parts"] = parts
+
+    json.dump(rep, open(os.path.join(a.out_dir, "HETU_REPORT.json"), "w"),
+              indent=2)
     print(f"\n#### HETU BENCHMARK v{HETU_BENCH_VERSION} — LATENCY ####")
-    if "capacity" in report:
-        c = report["capacity"]
-        print("LATENCY-vs-LOAD (the headline):")
-        for pt in c.get("curve", []):
-            print(f"  offered {pt['offered_rps']:>5} rps -> e2e p99 "
-                  f"{pt['e2e_p99']:>7}s  SLO {pt['slo_attainment']}")
-        print(f"  latency knee = {report.get('hetu_score_parts',{}).get('latency_knee_rps_p99_le_10s','?')}"
-              f" rps (p99<=10s);  past it: {c['degradation']}")
-    if "taxonomy" in report:
-        g = [r for r in report["taxonomy"] if not r.get("skipped")]
-        print("PER-SCENARIO LATENCY (e2e):")
-        for r in g:
-            m = r["metrics"]
-            gate = "" if r["verdict"] == "PASS" else "  [GATE-FAIL]"
-            print(f"  {r['scenario']}: p50={m['e2e_p50']}s "
-                  f"p95={m['e2e_p95']}s p99={m['e2e_p99']}s "
-                  f"queue_p95={m['per_model']}"[:118] + gate)
-            for mdl, pm in m["per_model"].items():
-                print(f"      {mdl}: e2e p50={pm['e2e_p50']}s "
-                      f"p95={pm['e2e_p95']}s p99={pm['e2e_p99']}s "
-                      f"queue_p95={pm['queue_p95']}s svc_p50={pm['svc_p50']}s")
-    if "burst" in report:
-        b = report["burst"]
-        print(f"BURST (Gamma): e2e p50={b['e2e_p50']}s p95={b['e2e_p95']}s "
-              f"p99={b['e2e_p99']}s SLO={b['slo_attainment']}")
-    if "hetu_score" in report:
-        p = report["hetu_score_parts"]
-        if p.get("gate_failed"):
-            print(f"HETU LATENCY SCORE = INVALID (gate failed: "
-                  f"{p.get('gate_failures')}) — latency untrustworthy")
+    if "sweep" in rep:
+        print("LATENCY vs OFFERED LOAD (the headline):")
+        for c in rep["sweep"]["curve"]:
+            print(f"  {c['offered_rps']:>5} rps | e2e p50={c['e2e_p50']}s "
+                  f"p99={c['e2e_p99']}s | queue p99={c['queue_p99']}s "
+                  f"switch p95={c['switch_p95']}s infer p50={c['infer_p50']}s"
+                  f" | SLO {c['slo_attainment']} dom={c['dominant']}")
+        print(f"  latency knee = {rep['sweep']['latency_knee_rps_p99_le_10s']}"
+              f" rps (p99<=10s)")
+    if "industrial" in rep:
+        s = rep["industrial"]
+        print(f"INDUSTRIAL (Gamma burst): e2e p50={s['e2e']['p50']}s "
+              f"p95={s['e2e']['p95']}s p99={s['e2e']['p99']}s | "
+              f"decomp queue {s['decomposition_share']['queue_pct']}%/"
+              f"switch {s['decomposition_share']['switch_pct']}%/infer "
+              f"{s['decomposition_share']['infer_pct']}% -> "
+              f"{s['dominant_latency']}")
+    if "refpoints" in rep:
+        print("REF POINTS (switch-induced latency vs same-model baseline):")
+        for n, r in rep["refpoints"].items():
+            print(f"  {n}: +{r['switch_induced_e2e_p95_delta_s']}s e2e p95")
+    if "hetu_latency_score" in rep:
+        p = rep["hetu_latency_score_parts"]
+        if p["gate_failed"]:
+            print("HETU LATENCY SCORE = INVALID (robustness gate failed)")
         else:
-            print(f"HETU LATENCY SCORE = {report['hetu_score']} / 100  "
-                  f"(SLO-attain={p['slo_attainment']}, "
-                  f"latency-knee={p['latency_knee_rps_p99_le_10s']}rps, "
-                  f"tail-pred={p['tail_predictability']})")
+            print(f"HETU LATENCY SCORE = {rep['hetu_latency_score']}/100 "
+                  f"(SLO-attain={p['slo_attainment']}, knee="
+                  f"{p['latency_knee_rps']}rps, jitter-pred="
+                  f"{p['jitter_predictability']})")
     print(f"REPORT -> {a.out_dir}/HETU_REPORT.json\nHETU_BENCH_DONE")
 
 

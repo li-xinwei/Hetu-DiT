@@ -63,7 +63,7 @@ class TaskHandle:
     """Tracks one submitted task's lifecycle for status polling."""
 
     __slots__ = ("task_id", "model_id", "submit_ts", "start_ts", "done_ts",
-                 "ok", "error")
+                 "ok", "error", "bind_s", "infer_s", "switched")
 
     def __init__(self, task_id: str, model_id: str):
         self.task_id = task_id
@@ -73,6 +73,17 @@ class TaskHandle:
         self.done_ts: Optional[float] = None
         self.ok: bool = False
         self.error: Optional[str] = None
+        # per-request latency decomposition of the service phase, filled
+        # by the engine's _serial_execute once known (the multimodel
+        # switch tax vs pure inference — the heart of "is switching slow")
+        self.bind_s: Optional[float] = None     # model-switch wall (0 if hot)
+        self.infer_s: Optional[float] = None    # pure inference wall
+        self.switched: Optional[bool] = None    # did this request switch?
+
+    def set_switch_cost(self, bind_s, infer_s, switched):
+        self.bind_s = bind_s
+        self.infer_s = infer_s
+        self.switched = switched
 
 
 class SerialModelDispatcher:

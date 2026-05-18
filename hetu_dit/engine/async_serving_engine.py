@@ -855,6 +855,19 @@ class AsyncServingEngine:
             f"infer_s={infer_s:.3f} res={_res}",
             flush=True,
         )
+        # Per-request latency decomposition write-back: record the
+        # switch tax (bind_s) vs pure inference (infer_s) onto the
+        # dispatcher TaskHandle so /task_timeline exposes the authoritative
+        # queue/switch/infer split per request (Hetu Benchmark needs this
+        # to attribute industrial-load latency, not just aggregate it).
+        try:
+            _sd = getattr(self, "_serial", None)
+            _h = _sd.get_handle(task_id) if _sd is not None else None
+            if _h is not None:
+                _h.set_switch_cost(bind_s, infer_s, bool(switched))
+        except Exception as e:  # noqa: BLE001 — never stall the consumer
+            logger.warning("[engine] switch-cost writeback skip %s: %s",
+                           task_id, e)
         try:
             if input_config is not None and "Model_Profiler" in (
                 input_config.prompt or ""
