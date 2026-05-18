@@ -790,28 +790,30 @@ class AsyncServingEngine:
         search_reconfigure / waiting_* — the circular-wait machinery (§8.33)
         is never entered, so it cannot deadlock.
         """
+        import time as _t
+
         engine_config = engine_config or self.engine_config
         model_id, model_entry = self._resolve_model_id(input_config, engine_config)
         ex = self._get_resident_executor()
 
         # rebind only on model change (switch-on-change; cheap per §8.31)
-        if getattr(self, "_resident_bound_model", None) != model_id:
-            logger.info(
-                "[engine] serial rebind %s -> %s (task %s)",
-                getattr(self, "_resident_bound_model", None),
-                model_id,
-                task_id,
-            )
+        prev_bound = getattr(self, "_resident_bound_model", None)
+        bind_s = 0.0
+        switched = prev_bound is not None and prev_bound != model_id
+        if prev_bound != model_id:
             ex.engine_config.model_config.model = model_entry.model_path
+            _b0 = _t.time()
             bind_task = await ex._run_workers_async(
                 "init_instance_model",
                 engine_config=ex.engine_config,
                 model_class=model_entry.model_class,
             )
             await bind_task
+            bind_s = _t.time() - _b0
             self._resident_bound_model = model_id
 
         ex.engine_config.diffusion_stage_ranks = ex.global_ranks
+        _i0 = _t.time()
         run_task_handle = await ex._run_workers_async(
             "execute_model",
             engine_config=ex.engine_config,
@@ -820,6 +822,22 @@ class AsyncServingEngine:
             task_id=task_id,
         )
         results = await run_task_handle
+        infer_s = _t.time() - _i0
+        # SWITCHCOST instrumentation -> stdout (tee'd server.log; init_logger
+        # is not captured, see §8.35). Itemizes the real model-switch time
+        # cost under the industrial load-imbalance workload.
+        _res = ""
+        try:
+            if input_config is not None:
+                _res = f"{input_config.width}x{input_config.height}"
+        except Exception:  # noqa: BLE001
+            pass
+        print(
+            f"SWITCHCOST task={task_id} from={prev_bound} to={model_id} "
+            f"switched={int(switched)} bind_s={bind_s:.3f} "
+            f"infer_s={infer_s:.3f} res={_res}",
+            flush=True,
+        )
         try:
             if input_config is not None and "Model_Profiler" in (
                 input_config.prompt or ""
