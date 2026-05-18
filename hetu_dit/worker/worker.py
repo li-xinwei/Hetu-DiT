@@ -429,15 +429,58 @@ class Worker:
         # peak max(OLD,NEW), so the swap fits and the RPC returns.
         if getattr(self, "model", None) is not None:
             try:
-                old = self.model
-                self.model = None
-                del old
                 import gc as _gc
 
+                _alloc0 = torch.cuda.memory_allocated()
+                old = self.model
+                self.model = None
+                # fix#4 (context.md §8.40): fix#3's `del old; gc; empty_cache`
+                # was a NO-OP for VRAM because some long-lived object still
+                # strong-refs the old pipeline across the del (proven: 4th
+                # swap OOMs with the prior model still 14GB-resident). The
+                # holder-agnostic fix is to MIGRATE the old pipeline off-GPU
+                # *before* dropping the ref: even if a ref survives, its
+                # tensors are now on CPU, so peak VRAM = NEW only (not
+                # OLD+NEW). .to("cpu") is symmetric with the .to("cuda") at
+                # load and recurses through the hetuDiT pipeline wrapper.
+                try:
+                    old.to("cpu")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"old.to('cpu') best-effort failed: {e}")
+                del old
                 _gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                logger.info("Freed previous model before live swap.")
+                _alloc1 = torch.cuda.memory_allocated()
+                logger.info(
+                    "Freed previous model before live swap. "
+                    f"cuda_allocated {_alloc0/2**30:.2f}GiB -> "
+                    f"{_alloc1/2**30:.2f}GiB (delta "
+                    f"{(_alloc0-_alloc1)/2**30:.2f}GiB)"
+                )
+                # Diagnostic: if VRAM did NOT drop, a hidden holder remains —
+                # name it so the root cause is evidence-based, not guessed.
+                if _alloc1 > 2 * 2**30 and (_alloc0 - _alloc1) < 1 * 2**30:
+                    import sys as _sys
+
+                    leak_obj = None
+                    for o in _gc.get_objects():
+                        if type(o).__name__.startswith("hetuDiT") and hasattr(
+                            o, "transformer"
+                        ):
+                            leak_obj = o
+                            break
+                    if leak_obj is not None:
+                        refs = _gc.get_referrers(leak_obj)
+                        kinds = [
+                            f"{type(r).__name__}"
+                            f"(rc={_sys.getrefcount(r)})"
+                            for r in refs[:8]
+                        ]
+                        logger.warning(
+                            f"LEAKHOLDER old pipeline still alive after "
+                            f"del+gc; referrer types={kinds}"
+                        )
             except Exception as e:  # noqa: BLE001 — unload must not wedge swap
                 logger.warning(f"pre-swap unload best-effort failed: {e}")
 
