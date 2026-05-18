@@ -543,6 +543,29 @@ async def list_models():
     }
 
 
+@app.get("/dispatch_stats")
+async def dispatch_stats():
+    """Authoritative serial-dispatcher counters.
+
+    The §8.41 /status endpoint false-"completed" on a stale-PNG glob, so
+    the load-imbalance suite cannot trust it. The dispatcher itself keeps
+    exact counters (completed/failed/per-model/switches/queue_depth);
+    expose them so the suite can (a) detect quiescence between scenarios
+    (queue_depth==0) for true per-scenario isolation and (b) compute
+    authoritative per-model completion as a stats delta — no /status, no
+    server.log join needed.
+    """
+    d = getattr(engine, "_serial", None)
+    if d is None:
+        return {"ready": False, "queue_depth": 0, "stats": {}}
+    return {
+        "ready": True,
+        "queue_depth": d.queue_depth,
+        "bound_model": getattr(d, "_bound_model", None),
+        "stats": d.stats,
+    }
+
+
 @app.get("/status/{task_id}")
 async def status(task_id: str):
     """Poll-able task status. Adds image_url once the worker has written the PNG.
