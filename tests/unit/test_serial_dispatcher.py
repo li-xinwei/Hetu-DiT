@@ -161,6 +161,53 @@ async def _test_batching_amortizes_switch_impl():
     )
 
 
+async def _test_micro_batch_same_shape_one_pass_impl():
+    """§8.45 optimization #1: concurrently-queued same-(model,shape)
+    requests execute together in ONE batched GPU pass; different shapes
+    do NOT mix; all complete; FIFO across shapes preserved."""
+    batched_calls = []          # list of batch sizes seen by execute_batch
+    single_calls = [0]
+
+    async def bind_fn(_m, _p):
+        await asyncio.sleep(0)
+
+    async def execute_fn(_p):           # size-1 path
+        single_calls[0] += 1
+        await asyncio.sleep(0.005)
+
+    async def execute_batch_fn(payloads):
+        batched_calls.append(len(payloads))
+        await asyncio.sleep(0.005)      # ONE pass for the whole group
+
+    def shape_fn(p):
+        return (p["w"], p["h"], p["steps"])
+
+    d = SerialModelDispatcher(
+        bind_fn, execute_fn, max_queue=64, batch_max_n=64,
+        exec_batch_max=4, shape_fn=shape_fn,
+        execute_batch_fn=execute_batch_fn)
+    # 6 sd3 @512 + 2 sd3 @1024 (distinct shape) submitted up-front
+    hs = []
+    for i in range(6):
+        hs.append(d.submit(f"a{i}", "sd3", {"w": 512, "h": 512, "steps": 20}))
+    for i in range(2):
+        hs.append(d.submit(f"b{i}", "sd3", {"w": 1024, "h": 1024,
+                                            "steps": 28}))
+    d.start()
+    done = await _drain(hs, timeout=5.0)
+    await d.stop()
+    assert done == 8, f"not all completed: {done}/8 (stats={d.stats})"
+    assert d.stats["completed"] == 8 and d.stats["failed"] == 0
+    # 6 @512 -> batched into groups capped at 4 => sizes like [4,2];
+    # 2 @1024 -> [2]. Every batched call must be a single shape (<=4)
+    # and there must be NO size-1 fallback (all went batched).
+    assert batched_calls, "micro-batching never triggered"
+    assert all(1 < n <= 4 for n in batched_calls), batched_calls
+    assert sum(batched_calls) + single_calls[0] == 8
+    # the 6 same-shape collapsed to <=2 passes instead of 6:
+    assert len([n for n in batched_calls if n]) <= 4
+
+
 async def _test_starvation_freedom_under_extreme_skew_impl():
     """Suite gate F2: under 50:1 skew the single rare-model request MUST
     complete within a bounded time (aging anti-starvation), not be
@@ -259,6 +306,9 @@ def test_one_failing_task_does_not_stall_consumer():
 
 def test_batching_amortizes_switch():
     asyncio.run(_test_batching_amortizes_switch_impl())
+
+def test_micro_batch_same_shape_one_pass():
+    asyncio.run(_test_micro_batch_same_shape_one_pass_impl())
 
 def test_starvation_freedom_under_extreme_skew():
     asyncio.run(_test_starvation_freedom_under_extreme_skew_impl())

@@ -114,6 +114,9 @@ class SerialModelDispatcher:
         batch_max_n: int = 8,
         batch_max_s: float = 20.0,
         starvation_deadline_s: float = 30.0,
+        exec_batch_max: int = 1,
+        shape_fn: Optional[Callable[[Any], Any]] = None,
+        execute_batch_fn: Optional[Callable[[list], Awaitable[Any]]] = None,
     ):
         self._bind = bind_fn
         self._execute = execute_fn
@@ -121,6 +124,14 @@ class SerialModelDispatcher:
         self._batch_max_n = batch_max_n
         self._batch_max_s = batch_max_s
         self._starv = starvation_deadline_s
+        # SOTA micro-batching (§8.45 optimization #1): execute up to
+        # exec_batch_max concurrently-queued requests of the SAME model
+        # AND SAME shape (shape_fn(payload) key) in ONE GPU pass via the
+        # diffusion batch dim. Default 1 + no fns = EXACT prior behaviour
+        # (zero-risk; the optimization is opt-in & benchmark-gated).
+        self._exec_batch_max = max(1, exec_batch_max)
+        self._shape_fn = shape_fn
+        self._execute_batch = execute_batch_fn
 
         # per-model FIFO queues of (task_id, payload, enqueue_ts)
         self._queues: Dict[str, Deque[Tuple[str, Any, float]]] = {}
@@ -253,9 +264,32 @@ class SerialModelDispatcher:
             model_id = self._pick_model(now)
             if model_id is None:
                 continue
-            task_id, payload, enq_ts = self._queues[model_id].popleft()
+            q = self._queues[model_id]
+            task_id, payload, enq_ts = q.popleft()
             self._depth -= 1
-            h = self._handles.get(task_id)
+            # ---- micro-batch gather: same model + same shape, FIFO,
+            # cap exec_batch_max. Disabled (size-1) by default => exact
+            # prior one-at-a-time behaviour.
+            batch = [(task_id, payload, enq_ts)]
+            if (self._exec_batch_max > 1 and self._shape_fn is not None
+                    and self._execute_batch is not None):
+                try:
+                    key = self._shape_fn(payload)
+                    keep = deque()
+                    while q and len(batch) < self._exec_batch_max:
+                        t2, p2, e2 = q.popleft()
+                        if self._shape_fn(p2) == key:
+                            batch.append((t2, p2, e2))
+                            self._depth -= 1
+                        else:
+                            keep.append((t2, p2, e2))
+                    # restore the non-matching ones we skipped, in order,
+                    # ahead of the remaining queue (FIFO preserved)
+                    while keep:
+                        q.appendleft(keep.pop())
+                except Exception:  # noqa: BLE001 — never wedge on shape_fn
+                    batch = [(task_id, payload, enq_ts)]
+            hs = [self._handles.get(t) for t, _, _ in batch]
             try:
                 if model_id != self._bound_model:
                     await self._bind(model_id, payload)
@@ -265,30 +299,39 @@ class SerialModelDispatcher:
                     self.stats["binds"] += 1
                     self._served_in_batch = 0
                     self._batch_started_ts = time.time()
-                self._served_in_batch += 1
+                self._served_in_batch += len(batch)
                 self._last_served_ts[model_id] = time.time()
-                if h is not None:
-                    h.start_ts = time.time()
-                    wait_s = h.start_ts - enq_ts
-                    if wait_s > self.stats["max_wait_s"]:
-                        self.stats["max_wait_s"] = wait_s
-                await self._execute(payload)
-                if h is not None:
-                    h.done_ts = time.time()
-                    h.ok = True
-                self.stats["completed"] += 1
-                self.stats["per_model"].setdefault(
-                    model_id, {"submitted": 0, "completed": 0, "failed": 0}
-                )["completed"] += 1
+                _now = time.time()
+                for (t, _p, e), hh in zip(batch, hs):
+                    if hh is not None:
+                        hh.start_ts = _now
+                        wait_s = _now - e
+                        if wait_s > self.stats["max_wait_s"]:
+                            self.stats["max_wait_s"] = wait_s
+                if len(batch) == 1:
+                    await self._execute(batch[0][1])
+                else:
+                    await self._execute_batch([p for _, p, _ in batch])
+                _d = time.time()
+                pm = self.stats["per_model"].setdefault(
+                    model_id, {"submitted": 0, "completed": 0, "failed": 0})
+                for hh in hs:
+                    if hh is not None:
+                        hh.done_ts = _d
+                        hh.ok = True
+                self.stats["completed"] += len(batch)
+                pm["completed"] += len(batch)
             except asyncio.CancelledError:
                 break
-            except Exception as e:  # noqa: BLE001 — one bad task must not
+            except Exception as e:  # noqa: BLE001 — one bad batch must not
                 # kill the consumer (that would reintroduce a stall).
-                if h is not None:
-                    h.done_ts = time.time()
-                    h.ok = False
-                    h.error = repr(e)
-                self.stats["failed"] += 1
+                _d = time.time()
+                for hh in hs:
+                    if hh is not None:
+                        hh.done_ts = _d
+                        hh.ok = False
+                        hh.error = repr(e)
+                self.stats["failed"] += len(batch)
                 self.stats["per_model"].setdefault(
                     model_id, {"submitted": 0, "completed": 0, "failed": 0}
-                )["failed"] += 1
+                )["failed"] += len(batch)
