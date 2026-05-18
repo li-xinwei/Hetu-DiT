@@ -331,8 +331,24 @@ def main():
                           "slo_attainment": s["slo_attainment"],
                           "dominant": s["dominant_latency"],
                           "gate_ok": s["gate_ok"]})
-        knee = max((c["offered_rps"] for c in curve
-                    if c["e2e_p99"] <= 10.0 and c["gate_ok"]), default=0.0)
+        # latency knee = offered rps where e2e p99 crosses 10s, LINEARLY
+        # INTERPOLATED between sweep points (not snapped to the grid) so a
+        # real latency improvement registers at sub-grid resolution
+        # (§8.46: opt#1 cut p99 22->14s but a grid-max knee stayed 0.2,
+        # hiding the win — that was benchmark blindness, fixed here).
+        cs = sorted([c for c in curve if c["gate_ok"]],
+                    key=lambda c: c["offered_rps"])
+        knee = 0.0
+        for i, c in enumerate(cs):
+            if c["e2e_p99"] <= 10.0:
+                knee = c["offered_rps"]
+            elif i > 0 and cs[i-1]["e2e_p99"] <= 10.0:
+                lo, hi = cs[i-1], c
+                span = hi["e2e_p99"] - lo["e2e_p99"]
+                frac = ((10.0 - lo["e2e_p99"]) / span) if span > 0 else 0.0
+                knee = round(lo["offered_rps"] + frac *
+                             (hi["offered_rps"] - lo["offered_rps"]), 3)
+                break
         rep["sweep"] = {"curve": curve, "latency_knee_rps_p99_le_10s": knee}
 
     if a.mode in ("refpoints", "all"):
@@ -350,18 +366,29 @@ def main():
                   f"same-model baseline", flush=True)
         rep["refpoints"] = rp
 
-    # LATENCY score (robustness only a gate). 55 SLO-attain (industrial)
-    # + 30 latency-knee (sweep, p99<=10s rps) + 15 jitter predictability.
+    # LATENCY score (robustness only a gate). De-saturated (§8.46): the
+    # SLO-attainment term is the mean over the HARD operating points —
+    # the sweep (which spans into overload) + the refpoint
+    # with-switching runs (the industrial-imbalance scenarios) — NOT the
+    # within-capacity industrial run (always ~1.0, blind to gains).
+    # 55·hard-SLO-attain + 30·latency-knee(interp) + 15·jitter-pred.
     parts = {}
     if a.mode == "all":
         ind = rep.get("industrial", {})
+        sweep = rep.get("sweep", {})
+        rps = rep.get("refpoints", {})
         gate_bad = not ind.get("gate_ok", True) or any(
-            not c["gate_ok"] for c in rep.get("sweep", {}).get("curve", []))
-        attn = ind.get("slo_attainment", 0.0)
-        knee = rep.get("sweep", {}).get("latency_knee_rps_p99_le_10s", 0.0)
+            not c["gate_ok"] for c in sweep.get("curve", [])) or any(
+            not v["with_switching"].get("gate_ok", True)
+            for v in rps.values())
+        hard = [c["slo_attainment"] for c in sweep.get("curve", [])]
+        hard += [v["with_switching"]["slo_attainment"]
+                 for v in rps.values()]
+        attn = round(sum(hard) / len(hard), 3) if hard else 0.0
+        knee = sweep.get("latency_knee_rps_p99_le_10s", 0.0)
         jit = ind.get("jitter_p99_over_p50") or 99
         jitscore = max(0.0, 1.0 - (jit - 1) / 9)
-        parts = {"slo_attainment": attn,
+        parts = {"hard_slo_attainment": attn,
                  "latency_knee_rps": knee,
                  "jitter_predictability": round(jitscore, 3),
                  "gate_failed": gate_bad}
@@ -400,7 +427,7 @@ def main():
             print("HETU LATENCY SCORE = INVALID (robustness gate failed)")
         else:
             print(f"HETU LATENCY SCORE = {rep['hetu_latency_score']}/100 "
-                  f"(SLO-attain={p['slo_attainment']}, knee="
+                  f"(hard-SLO-attain={p['hard_slo_attainment']}, knee="
                   f"{p['latency_knee_rps']}rps, jitter-pred="
                   f"{p['jitter_predictability']})")
     print(f"REPORT -> {a.out_dir}/HETU_REPORT.json\nHETU_BENCH_DONE")
