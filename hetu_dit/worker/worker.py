@@ -473,16 +473,18 @@ class Worker:
                     reset_cache_manager()
                 except Exception as _e:  # noqa: BLE001
                     print(f"TEARDOWN cache_manager skip: {_e}", flush=True)
-                try:
-                    from hetu_dit.core.resource_manager.singleton_model_manager import (  # noqa: E501
-                        ModelSingleton,
-                    )
-                    import hetu_dit.core.resource_manager.singleton_model_manager as _sm  # noqa: E501
-
-                    ModelSingleton._instances.clear()
-                    _sm._SINGLETON_MODEL_MANAGER = None
-                except Exception as _e:  # noqa: BLE001
-                    print(f"TEARDOWN singleton skip: {_e}", flush=True)
+                # NOTE (§8.42): fix#5 originally also cleared
+                # ModelSingleton._instances + _SINGLETON_MODEL_MANAGER here.
+                # That was WRONG: the singleton is CPU-resident (irrelevant
+                # to the GPU leak) but the execute/hotspa path still calls
+                # get_singleton_model_manager().transformer — nuking it
+                # caused 40× `AttributeError: 'NoneType' has no attribute
+                # 'transformer'` on every post-swap execute (all flux + all
+                # post-swap sd3 failed; suite all-FAIL). The VRAM reclaim
+                # comes from reset_runtime_state + pp reset_buffer +
+                # reset_cache_manager above (proven: structural_delta drove
+                # residual 1-6GiB -> 0.01GiB, OOM 0). Do NOT touch the
+                # singleton.
                 _gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
