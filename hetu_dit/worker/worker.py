@@ -448,14 +448,56 @@ class Worker:
                 del old
                 _gc.collect()
                 torch.cuda.empty_cache()
+                _a_model = torch.cuda.memory_allocated()
+                # fix#5 (§8.41 STRUCTURAL, not a refcount patch): evidence
+                # showed the 1st unload is clean (16.6->1.13GiB) but later
+                # ones stall at ~28GiB — i.e. del self.model frees the
+                # WEIGHTS, but the previous model's *global serving-state
+                # footprint* is never torn down: the persistent parallel-
+                # group lazily-allocated GPU recv/skip buffers, the
+                # DiTRuntimeState, the adjust-strategy cache manager, and
+                # the (PR-3) stale CPU ModelSingleton. The lifecycle never
+                # resets these on a live model swap, so they accrete across
+                # switches -> cumulative OOM. Tear the whole footprint down
+                # before loading the next model. Each guarded so teardown
+                # never wedges the swap.
+                try:
+                    reset_runtime_state(engine_config)
+                except Exception as _e:  # noqa: BLE001
+                    print(f"TEARDOWN runtime_state skip: {_e}", flush=True)
+                try:
+                    get_pp_group().reset_buffer()
+                except Exception as _e:  # noqa: BLE001
+                    print(f"TEARDOWN pp recv_buffer skip: {_e}", flush=True)
+                try:
+                    reset_cache_manager()
+                except Exception as _e:  # noqa: BLE001
+                    print(f"TEARDOWN cache_manager skip: {_e}", flush=True)
+                try:
+                    from hetu_dit.core.resource_manager.singleton_model_manager import (  # noqa: E501
+                        ModelSingleton,
+                    )
+                    import hetu_dit.core.resource_manager.singleton_model_manager as _sm  # noqa: E501
+
+                    ModelSingleton._instances.clear()
+                    _sm._SINGLETON_MODEL_MANAGER = None
+                except Exception as _e:  # noqa: BLE001
+                    print(f"TEARDOWN singleton skip: {_e}", flush=True)
+                _gc.collect()
+                torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 _a1 = torch.cuda.memory_allocated()
                 print(
-                    f"UNLOAD cuda_allocated {_a0/2**30:.2f}->{_a1/2**30:.2f}"
-                    f"GiB delta={(_a0-_a1)/2**30:.2f}GiB",
+                    f"UNLOAD cuda_allocated {_a0/2**30:.2f}->"
+                    f"{_a_model/2**30:.2f}(model)->{_a1/2**30:.2f}"
+                    f"GiB total_delta={(_a0-_a1)/2**30:.2f}GiB "
+                    f"structural_delta={(_a_model-_a1)/2**30:.2f}GiB",
                     flush=True,
                 )
-                if _a1 > 2 * 2**30 and (_a0 - _a1) < 1 * 2**30:
+                # Fire on high RESIDUAL (not requiring a tiny delta — the
+                # §8.41 later unloads had ~10GiB delta yet 28GiB residual,
+                # so the old gate never tripped). Name the holder.
+                if _a1 > 8 * 2**30:
                     held = {}
                     for o in _gc.get_objects():
                         try:
