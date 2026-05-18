@@ -751,7 +751,7 @@ class AsyncServingEngine:
         # linger is adaptive (stops the instant a poll yields no new
         # same-shape req, so no low-load latency tax). HETU_BATCH_LINGER_S=0
         # for the A-B baseline (opt#1-only).
-        linger_s = float(_os.environ.get("HETU_BATCH_LINGER_S", 1.5))
+        linger_s = float(_os.environ.get("HETU_BATCH_LINGER_S", 0.0))  # §8.48: opt#2/2b empirically falsified (no win vs opt#1-only, heavy_hog/industrial worse); linger OFF by default, opt#1(exec_batch=8)+opt#2b VRAM-cap kept
         self._serial = SerialModelDispatcher(
             _bind,
             _execute,
