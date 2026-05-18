@@ -32,7 +32,11 @@ import requests
 PROMPT = "A futuristic cityscape at golden hour, highly detailed"
 
 
-def gen(base, model, w, h, steps, seed):
+def gen(base, model, w, h, steps, seed, req_id):
+    # MUST send a unique req_id: the server builds
+    # task_id = f"task-{req_id}_{model}_{w}x{h}"; without it req_id=None and
+    # all same-(model,res) requests collide on one task_id (the §8.41
+    # harness bug that collapsed 40 arrivals to ~2 records).
     t = requests.post(
         f"{base}/generate",
         json={
@@ -43,6 +47,7 @@ def gen(base, model, w, h, steps, seed):
             "height": h,
             "num_inference_steps": steps,
             "seed": seed,
+            "req_id": req_id,
         },
         timeout=30,
     )
@@ -111,7 +116,7 @@ def main():
             time.sleep(0.01)
         st = round(time.time() - t0, 3)
         try:
-            tid = gen(a.base_url, model, w, h, steps, 42 + idx)
+            tid = gen(a.base_url, model, w, h, steps, 42 + idx, f"li{idx}")
         except Exception as e:  # noqa: BLE001
             print(f"SEND_FAIL idx={idx} model={model}: {e}", flush=True)
             return

@@ -431,56 +431,56 @@ class Worker:
             try:
                 import gc as _gc
 
-                _alloc0 = torch.cuda.memory_allocated()
+                # fix#4 (old.to("cpu") before del) was REVERTED in §8.41: it
+                # added a full GPU->CPU weight copy to every switch (bind_s
+                # 9/6s -> 20/27s, ~3x regression) and STILL OOM'd, proving
+                # the leaked GPU memory is not reachable from self.model.
+                # Back to fix#3 (del+gc+empty_cache) which is faster and
+                # sufficient for the realistic low-switch-frequency
+                # scenarios (coldburst/gpuhog); the frequent-switch
+                # cumulative OOM is a documented architectural limit
+                # (PR-3/PR-4 worker model-lifecycle rework — needs Yifei).
+                # Diagnostic is now print(flush=True) so it lands in the
+                # tee'd server.log (worker logger.* does NOT).
+                _a0 = torch.cuda.memory_allocated()
                 old = self.model
                 self.model = None
-                # fix#4 (context.md §8.40): fix#3's `del old; gc; empty_cache`
-                # was a NO-OP for VRAM because some long-lived object still
-                # strong-refs the old pipeline across the del (proven: 4th
-                # swap OOMs with the prior model still 14GB-resident). The
-                # holder-agnostic fix is to MIGRATE the old pipeline off-GPU
-                # *before* dropping the ref: even if a ref survives, its
-                # tensors are now on CPU, so peak VRAM = NEW only (not
-                # OLD+NEW). .to("cpu") is symmetric with the .to("cuda") at
-                # load and recurses through the hetuDiT pipeline wrapper.
-                try:
-                    old.to("cpu")
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"old.to('cpu') best-effort failed: {e}")
                 del old
                 _gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                _alloc1 = torch.cuda.memory_allocated()
-                logger.info(
-                    "Freed previous model before live swap. "
-                    f"cuda_allocated {_alloc0/2**30:.2f}GiB -> "
-                    f"{_alloc1/2**30:.2f}GiB (delta "
-                    f"{(_alloc0-_alloc1)/2**30:.2f}GiB)"
+                _a1 = torch.cuda.memory_allocated()
+                print(
+                    f"UNLOAD cuda_allocated {_a0/2**30:.2f}->{_a1/2**30:.2f}"
+                    f"GiB delta={(_a0-_a1)/2**30:.2f}GiB",
+                    flush=True,
                 )
-                # Diagnostic: if VRAM did NOT drop, a hidden holder remains —
-                # name it so the root cause is evidence-based, not guessed.
-                if _alloc1 > 2 * 2**30 and (_alloc0 - _alloc1) < 1 * 2**30:
-                    import sys as _sys
-
-                    leak_obj = None
+                if _a1 > 2 * 2**30 and (_a0 - _a1) < 1 * 2**30:
+                    held = {}
                     for o in _gc.get_objects():
-                        if type(o).__name__.startswith("hetuDiT") and hasattr(
-                            o, "transformer"
-                        ):
-                            leak_obj = o
-                            break
-                    if leak_obj is not None:
-                        refs = _gc.get_referrers(leak_obj)
-                        kinds = [
-                            f"{type(r).__name__}"
-                            f"(rc={_sys.getrefcount(r)})"
-                            for r in refs[:8]
-                        ]
-                        logger.warning(
-                            f"LEAKHOLDER old pipeline still alive after "
-                            f"del+gc; referrer types={kinds}"
-                        )
+                        try:
+                            if (
+                                torch.is_tensor(o)
+                                and o.is_cuda
+                                and o.numel() * o.element_size() > 64 * 2**20
+                            ):
+                                rs = _gc.get_referrers(o)
+                                tn = type(rs[0]).__name__ if rs else "?"
+                                held[tn] = held.get(tn, 0) + (
+                                    o.numel() * o.element_size()
+                                )
+                        except Exception:  # noqa: BLE001
+                            continue
+                    top = sorted(
+                        held.items(), key=lambda kv: -kv[1]
+                    )[:6]
+                    print(
+                        "LEAKHOLDER cuda-tensor owners (type:GiB): "
+                        + ", ".join(
+                            f"{k}:{v/2**30:.2f}" for k, v in top
+                        ),
+                        flush=True,
+                    )
             except Exception as e:  # noqa: BLE001 — unload must not wedge swap
                 logger.warning(f"pre-swap unload best-effort failed: {e}")
 
