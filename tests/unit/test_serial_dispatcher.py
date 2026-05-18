@@ -208,6 +208,49 @@ async def _test_micro_batch_same_shape_one_pass_impl():
     assert len([n for n in batched_calls if n]) <= 4
 
 
+async def _test_opt2_linger_batches_paced_arrivals_impl():
+    """§8.46 opt#2: with a linger, requests that arrive AFTER the head
+    (paced load) still get batched into ONE GPU pass; linger is bounded;
+    without linger the head would fire alone (size-1)."""
+    seen = []
+
+    async def bind_fn(_m, _p):
+        await asyncio.sleep(0)
+
+    async def execute_fn(_p):       # size-1 path
+        seen.append(1)
+        await asyncio.sleep(0.01)
+
+    async def execute_batch_fn(payloads):
+        seen.append(len(payloads))
+        await asyncio.sleep(0.01)
+
+    def shape_fn(p):
+        return (p["w"], p["h"])
+
+    d = SerialModelDispatcher(
+        bind_fn, execute_fn, max_queue=64, batch_max_n=64,
+        exec_batch_max=8, shape_fn=shape_fn,
+        execute_batch_fn=execute_batch_fn,
+        batch_linger_s=1.0, batch_linger_poll=0.02)
+    d.start()
+    h0 = d.submit("p0", "sd3", {"w": 512, "h": 512})  # head
+    # paced arrivals AFTER the head, within the 1.0s linger window
+    later = []
+    for k in range(4):
+        await asyncio.sleep(0.1)
+        later.append(d.submit(f"p{k+1}", "sd3", {"w": 512, "h": 512}))
+    done = await _drain([h0] + later, timeout=5.0)
+    await d.stop()
+    assert done == 5, f"not all done: {done}/5 ({d.stats})"
+    # the linger must have collapsed the 5 paced arrivals into >=1
+    # batched call (size>1); a no-linger dispatcher would show 5 size-1.
+    assert any(n > 1 for n in seen), f"linger failed to batch: {seen}"
+    assert sum(seen) == 5 and d.stats["completed"] == 5
+    # head latency bounded by ~linger (1.0s) + service, not unbounded
+    assert (h0.done_ts - h0.submit_ts) < 3.0, "linger not bounded"
+
+
 async def _test_starvation_freedom_under_extreme_skew_impl():
     """Suite gate F2: under 50:1 skew the single rare-model request MUST
     complete within a bounded time (aging anti-starvation), not be
@@ -309,6 +352,9 @@ def test_batching_amortizes_switch():
 
 def test_micro_batch_same_shape_one_pass():
     asyncio.run(_test_micro_batch_same_shape_one_pass_impl())
+
+def test_opt2_linger_batches_paced_arrivals():
+    asyncio.run(_test_opt2_linger_batches_paced_arrivals_impl())
 
 def test_starvation_freedom_under_extreme_skew():
     asyncio.run(_test_starvation_freedom_under_extreme_skew_impl())

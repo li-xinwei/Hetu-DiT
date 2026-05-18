@@ -728,6 +728,11 @@ class AsyncServingEngine:
         # forward is the SOTA fix. Set HETU_EXEC_BATCH=1 only for the A/B
         # baseline run.
         exec_batch = int(_os.environ.get("HETU_EXEC_BATCH", 8))
+        # §8.46 opt#2 dynamic-batch linger: DEFAULT-ON 2.0s (bold). Under
+        # paced industrial arrivals this is what actually fills batches;
+        # bounded + fairness-safe. HETU_BATCH_LINGER_S=0 for the A-B
+        # baseline (opt#1-only).
+        linger_s = float(_os.environ.get("HETU_BATCH_LINGER_S", 2.0))
         self._serial = SerialModelDispatcher(
             _bind,
             _execute,
@@ -738,6 +743,7 @@ class AsyncServingEngine:
             exec_batch_max=exec_batch,
             shape_fn=_shape_fn,
             execute_batch_fn=_execute_batch,
+            batch_linger_s=linger_s,
         )
         self._serial.start()
         logger.info(
