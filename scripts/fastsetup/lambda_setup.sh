@@ -15,6 +15,11 @@ pip install -q -U pip
 mkdir -p "$ROOT/work"; [ -d "$REPO" ] || git clone --depth=1 -b "$BRANCH" \
   https://github.com/li-xinwei/Hetu-DiT "$REPO"
 cd "$REPO" && git pull -q || true
+# flash-attn prebuilt wheel FIRST: `pip install -e .` pulls yunchang==0.3.5
+# which requires flash_attn; without the wheel pre-satisfied pip builds it
+# from sdist (no nvcc on Lambda Stack) -> fails -> set -e aborts the whole
+# recipe atomically (the §8.39 silent-bootstrap bug).
+pip install -q "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl"
 pip install -q -e .
 # The §8.36 fixes, applied in ONE pass (no rediscovery):
 #  - numpy/scipy ABI pin (Lambda Stack system numpy is 2.x; scipy/diffusers
@@ -29,7 +34,6 @@ pip install -q accelerate "diffusers==0.32.0" "transformers==4.49.0" \
   "huggingface_hub>=0.26,<1.0" sentencepiece beautifulsoup4 "yunchang==0.3.5" \
   flask "opencv-python==4.9.0.80" "ray==2.39.0" "fastapi==0.110.0" \
   "uvicorn==0.28.0" aiohttp pulp matplotlib pytest
-pip install -q "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl"
 pip install -q nixl || echo "nixl optional (adjust_strategy=base ok without)"
 python -c 'from hetu_dit.entrypoint.api_server import app; from hetu_dit.engine.serial_dispatcher import SerialModelDispatcher; print("IMPORTS_OK")'
 echo "ENV_SETUP_DONE in $(( $(date +%s)-t0 ))s  (venv=$VENV)"
