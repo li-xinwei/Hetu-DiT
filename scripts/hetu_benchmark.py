@@ -2,34 +2,36 @@
 """Hetu Benchmark — the complete UX/SLO-centric multimodel serving
 load-imbalance benchmark for Hetu-DiT.  HETU_BENCH_VERSION = 1.
 
-WHY THIS EXISTS
----------------
-Raw throughput and mean latency do NOT measure user experience. The
-industry/academic consensus (DistServe/AlpaServe/Clockwork/Shepherd/
-InferFair OSDI'23-'24; DiffServe/MoDM/HADIS MLSys'25; BurstGPT Azure
-trace; NVIDIA/Anyscale benchmarking guides — see HETU_BENCHMARK.md) is
-that what users actually feel under industrial high-concurrency +
-load-imbalance is captured by:
+WHY THIS EXISTS — LATENCY IS THE SUBJECT
+----------------------------------------
+This benchmark measures ONE thing: the serving LATENCY a user feels
+under industrial high-concurrency + load imbalance. Everything else
+(no-crash / no-OOM / no-starvation / no-collapse) is only a PASS/FAIL
+GATE — a run that crashes can't have meaningful latency, but "didn't
+crash" is NOT the score. The score is latency.
 
-  1. GOODPUT@SLO  — completed requests/s that met their latency SLO
-     (the headline number; ties resource use to UX & revenue).
-  2. SLO ATTAINMENT % per model & per SLO-class (interactive vs batch);
-     mean hides the tail — a 200ms mean can have a 3s p99.
-  3. TAIL latency distribution p50/p90/p95/p99/max, DECOMPOSED into
-     queue (waiting behind others) + service (model-switch tax +
-     inference). Predictability (p99/p50 spread) is itself UX (Clockwork).
-  4. FAIRNESS / performance isolation across models — Jain's index on
-     per-model SLO-attainment; a heavy model must not blow a cold
-     model's SLO (the §8.41 starvation bug, formalized).
-  5. STARVATION-FREEDOM — every model with demand makes bounded-time
-     progress (min per-model completion ratio; max enqueue→start wait).
-  6. CAPACITY — goodput@SLO vs offered load curve; the SLO-attainment
-     "knee" = max sustainable RPS at >=99% goodput (DiffServe/MoDM).
-  7. OVERLOAD DEGRADATION — graceful (admission-shed, bounded latency,
-     goodput plateaus) vs COLLAPSE (goodput craters, GPU idle, the
-     §8.32 failure). Classified from the rate-sweep.
-  8. SWITCH / COLD-START TAX — model-swap wall time and how often it
-     lands on the user critical path.
+The LATENCY measurements (industry/academic basis in HETU_BENCHMARK.md —
+DistServe/Clockwork/InferFair/DiffServe/MoDM/BurstGPT/Anyscale/NVIDIA):
+
+  1. e2e LATENCY DISTRIBUTION p50/p95/p99/max — the number the user
+     feels; mean is banned (a 200ms mean hides a 3s p99).
+  2. LATENCY DECOMPOSITION  e2e = queue (waiting behind others)
+     + service (model-switch tax + inference). Attributes WHERE the
+     latency goes — the multimodel-specific part is the switch tax.
+  3. LATENCY-vs-LOAD CURVE (the headline): e2e p99 swept over offered
+     load → the latency knee (max rps keeping p99 interactive) and how
+     steeply latency degrades past it.
+  4. PER-MODEL latency under skew — the cold/rare model's latency
+     penalty vs the hot model (load-imbalance's UX impact).
+  5. SWITCH / COLD-START TAX — model-swap wall time (measured: hot 0s,
+     sd3↔flux 6–9s) and how often it lands on the critical path.
+  6. SLO-attainment / goodput@SLO — % of requests whose e2e met their
+     latency target (latency expressed as a UX pass-rate).
+  7. TAIL PREDICTABILITY p99/p50 ratio (Clockwork: users hate variance).
+
+GATES (binary, NOT scored — a failure invalidates the latency result):
+no OOM, no collapse, every model with demand makes progress
+(starvation-freedom), fairness not pathological.
 
 It AGGREGATES every prior finding (context.md §8.30–§8.43): the
 deterministic load-imbalance taxonomy (A skew / B temporal / C
@@ -418,32 +420,44 @@ def run_capacity(base, out_dir, rates, slo_scale, dur, drain_s):
 
 
 def hetu_score(tax, cap):
-    """Composite 0-100. Weights: SLO-attainment 30, fairness 20,
-    starvation-freedom 20, tail predictability 15, capacity/graceful 15."""
+    """LATENCY score 0-100. The score IS latency quality; robustness is
+    only a GATE. Composition (all latency-derived):
+      • 55  SLO-attainment — fraction of requests whose e2e met its
+             latency target (latency as a UX pass-rate).
+      • 30  latency-knee — offered rps still keeping p99 interactive,
+             normalized (capacity at which latency stays good).
+      • 15  tail predictability — 1/(p99÷p50 spread) (Clockwork).
+    GATE: if any robustness gate fails (a scenario verdict==FAIL =
+    crash/OOM/starvation/collapse), the latency result is INVALID and
+    the score is reported as 0 with gate_failed=True — you cannot trust
+    a latency number from a run that didn't stay up."""
     graded = [r for r in tax if not r.get("skipped")]
     if not graded:
-        return 0.0, {}
-    npass = sum(1 for r in graded if r["verdict"] == "PASS")
+        return 0.0, {"gate_failed": True, "reason": "no graded scenarios"}
+    gate_fail = [r["scenario"] for r in graded if r["verdict"] == "FAIL"]
     attn = sum(r["metrics"]["slo_attainment"] for r in graded) / len(graded)
-    jain = sum(r["metrics"]["fairness_jain"] for r in graded) / len(graded)
-    starv = sum(r["metrics"]["min_per_model_complete"]
-                for r in graded) / len(graded)
     tails = [r["metrics"]["tail_ratio_p99_p50"] for r in graded
              if isinstance(r["metrics"]["tail_ratio_p99_p50"], (int, float))
              and r["metrics"]["tail_ratio_p99_p50"] == r["metrics"][
                  "tail_ratio_p99_p50"]]
     tailpred = max(0.0, 1.0 - (sum(tails)/len(tails) - 1) / 9) if tails else 1
-    grace = 1.0 if cap and cap.get("degradation") == "GRACEFUL" else 0.4
+    # latency-knee: rps at which p99 still <= 10s (interactive), /1.0 cap
+    knee = 0.0
+    if cap:
+        good = [c["offered_rps"] for c in cap.get("curve", [])
+                if c.get("e2e_p99", 1e9) <= 10.0]
+        knee = max(good) if good else 0.0
+    knee_n = min(1.0, knee / 1.0)        # 1.0 rps p99<=10s == full marks
     parts = {
-        "scenario_pass": round(npass / len(graded), 3),
         "slo_attainment": round(attn, 3),
-        "fairness_jain": round(jain, 3),
-        "starvation_freedom": round(starv, 3),
+        "latency_knee_rps_p99_le_10s": round(knee, 3),
         "tail_predictability": round(tailpred, 3),
-        "graceful_degradation": grace,
+        "gate_failed": bool(gate_fail),
+        "gate_failures": gate_fail,
     }
-    score = (30 * attn + 20 * jain + 20 * starv + 15 * tailpred
-             + 15 * grace) * (npass / len(graded))
+    if gate_fail:
+        return 0.0, parts          # invalid latency result — gated out
+    score = 55 * attn + 30 * knee_n + 15 * tailpred
     return round(score, 1), parts
 
 
@@ -500,23 +514,42 @@ def main():
         report["hetu_score_parts"] = parts
     json.dump(report, open(os.path.join(a.out_dir, "HETU_REPORT.json"),
                            "w"), indent=2)
-    print(f"\n#### HETU BENCHMARK v{HETU_BENCH_VERSION} ####")
-    if "taxonomy" in report:
-        g = [r for r in report["taxonomy"] if not r.get("skipped")]
-        npass = sum(1 for r in g if r["verdict"] == "PASS")
-        print(f"taxonomy: {npass}/{len(g)} scenarios PASS")
-        for r in g:
-            print(f"  [{r['verdict']}] {r['scenario']}: "
-                  f"attain={r['metrics']['slo_attainment']} "
-                  f"jain={r['metrics']['fairness_jain']} "
-                  f"p99={r['metrics']['e2e_p99']}s")
+    print(f"\n#### HETU BENCHMARK v{HETU_BENCH_VERSION} — LATENCY ####")
     if "capacity" in report:
         c = report["capacity"]
-        print(f"capacity: {c['capacity_rps_at_99pct']} rps @>=99% SLO; "
-              f"degradation={c['degradation']}")
+        print("LATENCY-vs-LOAD (the headline):")
+        for pt in c.get("curve", []):
+            print(f"  offered {pt['offered_rps']:>5} rps -> e2e p99 "
+                  f"{pt['e2e_p99']:>7}s  SLO {pt['slo_attainment']}")
+        print(f"  latency knee = {report.get('hetu_score_parts',{}).get('latency_knee_rps_p99_le_10s','?')}"
+              f" rps (p99<=10s);  past it: {c['degradation']}")
+    if "taxonomy" in report:
+        g = [r for r in report["taxonomy"] if not r.get("skipped")]
+        print("PER-SCENARIO LATENCY (e2e):")
+        for r in g:
+            m = r["metrics"]
+            gate = "" if r["verdict"] == "PASS" else "  [GATE-FAIL]"
+            print(f"  {r['scenario']}: p50={m['e2e_p50']}s "
+                  f"p95={m['e2e_p95']}s p99={m['e2e_p99']}s "
+                  f"queue_p95={m['per_model']}"[:118] + gate)
+            for mdl, pm in m["per_model"].items():
+                print(f"      {mdl}: e2e p50={pm['e2e_p50']}s "
+                      f"p95={pm['e2e_p95']}s p99={pm['e2e_p99']}s "
+                      f"queue_p95={pm['queue_p95']}s svc_p50={pm['svc_p50']}s")
+    if "burst" in report:
+        b = report["burst"]
+        print(f"BURST (Gamma): e2e p50={b['e2e_p50']}s p95={b['e2e_p95']}s "
+              f"p99={b['e2e_p99']}s SLO={b['slo_attainment']}")
     if "hetu_score" in report:
-        print(f"HETU SCORE = {report['hetu_score']} / 100  "
-              f"{report['hetu_score_parts']}")
+        p = report["hetu_score_parts"]
+        if p.get("gate_failed"):
+            print(f"HETU LATENCY SCORE = INVALID (gate failed: "
+                  f"{p.get('gate_failures')}) — latency untrustworthy")
+        else:
+            print(f"HETU LATENCY SCORE = {report['hetu_score']} / 100  "
+                  f"(SLO-attain={p['slo_attainment']}, "
+                  f"latency-knee={p['latency_knee_rps_p99_le_10s']}rps, "
+                  f"tail-pred={p['tail_predictability']})")
     print(f"REPORT -> {a.out_dir}/HETU_REPORT.json\nHETU_BENCH_DONE")
 
 

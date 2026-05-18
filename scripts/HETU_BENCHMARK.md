@@ -70,12 +70,20 @@ give authoritative per-request truth — **no dependence on the §8.41-buggy
 - **burst** — BurstGPT-style Gamma arrivals (shape α = burstiness,
   `--skew` heavy-model probability), seeded/reproducible.
 
-## 4. Hetu Score (composite 0–100)
+## 4. Hetu Latency Score (0–100) — latency only, robustness is a GATE
 
-`(30·SLO-attain + 20·Jain + 20·starvation-freedom + 15·tail-predictability
-+ 15·graceful-degradation) × scenario-pass-fraction`. One number for
-"is Hetu-DiT a good multimodel server under load imbalance", plus the
-per-scenario and capacity breakdowns.
+The score IS latency quality. Robustness (no OOM / no collapse /
+starvation-freedom / fairness) is a **binary GATE only**: any scenario
+verdict==FAIL invalidates the run (score = INVALID) — you cannot trust a
+latency number from a server that didn't stay up. When the gate passes:
+
+`55·SLO-attainment + 30·latency-knee(rps@p99≤10s, /1.0) +
+15·tail-predictability(1/(p99÷p50 spread))`.
+
+All three terms are latency-derived; throughput/fairness/graceful are
+NOT weighted in. The headline output is the **latency-vs-load curve**
+(e2e p99 swept over offered load) + the per-scenario / per-model e2e
+p50/p95/p99 with queue-vs-service decomposition.
 
 ## 5. Run it — anytime
 
