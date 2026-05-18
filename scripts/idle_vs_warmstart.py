@@ -87,10 +87,43 @@ def _pct(xs, q):
 
 
 def _route(pole, m, urls):
-    # Pole A: sd3->sd3 server, flux->flux server. Pole B: single url.
+    # Pole A: sd3->sd3 server, flux->flux server. Pole B / Asolo: one url.
     if pole == "A":
         return urls["sd3"] if m == "sd3" else urls["flux"]
     return urls["one"]
+
+
+def dedicated_idle_fraction(tl, sub, wall):
+    """Analytic idle fraction of a DEDICATED card serving only the
+    requests in `sub`: union of [start_ts,done_ts] busy intervals over
+    the run window; idle = 1 - busy/wall. Exact (the wasted-card price
+    of Pole A's zero-switch latency) — independent of a 2nd physical
+    card, so faithful on 1 GPU."""
+    iv = []
+    t0 = None
+    for tid in sub:
+        h = tl.get(tid)
+        if not h or h.get("start_ts") is None or h.get("done_ts") is None:
+            continue
+        iv.append((h["submit_ts"], h["done_ts"], h["start_ts"]))
+    if not iv:
+        return None
+    base = min(x[0] for x in iv)
+    busy = sorted((s - base, d - base) for _, d, s in
+                  [(a, b, c) for a, b, c in iv])
+    merged, ce = 0.0, -1.0
+    cs = None
+    for s, e in busy:
+        if cs is None:
+            cs, ce = s, e
+        elif s <= ce:
+            ce = max(ce, e)
+        else:
+            merged += ce - cs
+            cs, ce = s, e
+    if cs is not None:
+        merged += ce - cs
+    return round(max(0.0, 1.0 - merged / max(1e-6, wall)), 3)
 
 
 def drain(url, max_wait):
@@ -111,7 +144,11 @@ def run_workload(pole, name, arr, urls, drain_s):
     sub, lock, t0 = {}, threading.Lock(), time.time()
     print(f"\n=== POLE {pole} :: {name} (n={len(arr)}) ===", flush=True)
 
+    only_m = urls.get("_only")
+
     def fire(i, off, m, w, h, st):
+        if only_m and m != only_m:
+            return                       # dedicated card sees only its model
         while time.time() - t0 < off:
             time.sleep(0.01)
         u = _route(pole, m, urls)
@@ -129,13 +166,14 @@ def run_workload(pole, name, arr, urls, drain_s):
         t.start()
     while any(t.is_alive() for t in ths):
         time.sleep(0.5)
-    for u in set(urls.values()):
+    _server_urls = {v for k,v in urls.items() if k!="_only"}
+    for u in _server_urls:
         drain(u, drain_s)
     wall = time.time() - t0
 
     # authoritative per-request timeline from each server involved
     tl = {}
-    for u in set(urls.values()):
+    for u in _server_urls:
         try:
             for h in requests.get(f"{u}/task_timeline",
                                   timeout=10).json().get("handles", []):
@@ -154,9 +192,10 @@ def run_workload(pole, name, arr, urls, drain_s):
         q.append(_q)
         sw.append(_s)
         per.setdefault(m, []).append(_e)
-    return {
+    out = {
         "pole": pole, "workload": name, "wall_s": round(wall, 1),
-        "n": len(arr), "completed": len(e2e),
+        "n": len([1 for a in arr if not only_m or a[1] == only_m]),
+        "completed": len(e2e),
         "e2e_p50": _pct(e2e, .5), "e2e_p95": _pct(e2e, .95),
         "e2e_p99": _pct(e2e, .99),
         "switch_share_pct": round(100 * sum(sw) / sum(e2e), 1)
@@ -164,6 +203,10 @@ def run_workload(pole, name, arr, urls, drain_s):
         "switch_p95_s": _pct(sw, .95),
         "per_model_e2e_p95": {m: _pct(v, .95) for m, v in per.items()},
     }
+    if only_m:
+        out["dedicated_card_idle_fraction"] = dedicated_idle_fraction(
+            tl, sub, wall)
+    return out
 
 
 def gpu_idle_from_sampler(path, t_start_epoch, t_end_epoch):
@@ -190,7 +233,12 @@ def gpu_idle_from_sampler(path, t_start_epoch, t_end_epoch):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pole", required=True, choices=["A", "B"])
+    ap.add_argument("--pole", required=True, choices=["A", "B", "Asolo"])
+    ap.add_argument("--only-model", default="",
+                    help="Asolo: fire ONLY this model's subset of each "
+                    "workload to one dedicated server (faithful to a "
+                    "per-model card, which by independence has identical "
+                    "latency to the 2-GPU Pole A — no cross-card contention)")
     ap.add_argument("--url", default="http://localhost:8000",
                     help="Pole B single server")
     ap.add_argument("--sd3-url", default="http://localhost:8000")
@@ -200,8 +248,12 @@ def main():
                     help="server-side nvidia-smi sample file (epoch,idx,util)")
     ap.add_argument("--out", default="/tmp/idle_vs_warm.json")
     a = ap.parse_args()
-    urls = ({"sd3": a.sd3_url, "flux": a.flux_url} if a.pole == "A"
-            else {"one": a.url})
+    if a.pole == "A":
+        urls = {"sd3": a.sd3_url, "flux": a.flux_url}
+    elif a.pole == "Asolo":
+        urls = {"one": a.url, "_only": a.only_model}
+    else:
+        urls = {"one": a.url}
     res, t0 = [], time.time()
     for name, arr in workloads().items():
         res.append(run_workload(a.pole, name, arr, urls, a.drain_s))
