@@ -70,6 +70,57 @@ def workloads():
     }
 
 
+def frontier_ttl_sweep(rare_submit_times, s_rare, c, ttl_grid=None):
+    """Pillar ②: FORMALIZE the idle-vs-warmstart tradeoff as an
+    idle-timeout-TTL Pareto frontier (online-caching / ski-rental view).
+
+    The residency policy "keep a model loaded TTL seconds after its last
+    use, then evict" is the CONTINUOUS knob between §8.50's two measured
+    poles:
+        TTL=0   → evict immediately  = SHARED pole (every gap is a cold
+                  re-load: max switch-tax, ~0 idle waste).
+        TTL=∞   → never evict        = DEDICATED pole (0 switch-tax, the
+                  card sits idle through every gap: max idle waste).
+    Replay the rare model's real arrival trace on its (evictable) card;
+    for each TTL t accumulate idle-GPU-seconds and switch (cold-start)
+    count. Endpoints reproduce §8.50; the swept curve is the frontier.
+
+    Ski-rental optimum: keeping a model resident over an idle gap costs
+    (gap × idle_rate); reloading costs c. Evict iff gap > c ⇒ the
+    deterministic-optimal TTL = c (2-competitive). So the "knee" of the
+    frontier sits at TTL ≈ switch-cost — a clean, citable result.
+
+    Inputs s_rare (measured per-req service) and c (measured switch cost)
+    come from the REAL run, so this is analytic-on-measured, not faked.
+    """
+    arr = sorted(rare_submit_times)
+    if ttl_grid is None:
+        ttl_grid = [0.0, 1, 3, c, 2 * c, 15, 30, 60, 1e9]
+    n = len(arr)
+    out = []
+    for t in ttl_grid:
+        idle, misses = 0.0, (1 if n else 0)   # first use is always a load
+        for i in range(n - 1):
+            gap = arr[i + 1] - (arr[i] + s_rare)
+            if gap <= 0:
+                continue                       # next arrives during service
+            if gap <= t:
+                idle += gap                    # resident & idle the whole gap
+            else:
+                idle += t                      # kept t, then evicted
+                misses += 1                    # next use is a cold re-load
+        out.append({"ttl_s": (None if t >= 1e9 else round(t, 2)),
+                    "idle_gpu_s": round(idle, 1),
+                    "switches": misses,
+                    "switch_tax_s": round(misses * c, 1)})
+    return {"s_rare_s": s_rare, "switch_cost_s": c,
+            "n_rare_arrivals": n,
+            "ski_rental_optimal_ttl_s": round(c, 2),
+            "shared_pole(ttl=0)": out[0],
+            "dedicated_pole(ttl=inf)": out[-1],
+            "frontier": out}
+
+
 def gen(url, m, w, h, st, seed, rid):
     r = requests.post(f"{url}/generate", json={
         "model": m, "prompt": PROMPT, "negative_prompt": "low quality",
@@ -233,7 +284,15 @@ def gpu_idle_from_sampler(path, t_start_epoch, t_end_epoch):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pole", required=True, choices=["A", "B", "Asolo"])
+    ap.add_argument("--pole", choices=["A", "B", "Asolo"])
+    ap.add_argument("--frontier", action="store_true",
+                    help="pillar②: offline TTL-sweep frontier from the rare "
+                    "model's trace + measured --s-rare/--switch-cost")
+    ap.add_argument("--s-rare", type=float, default=3.8,
+                    help="measured rare-model per-req service s (e.g. flux)")
+    ap.add_argument("--switch-cost", type=float, default=7.0,
+                    help="measured model-switch cost c (~6-9s, §8.40)")
+    ap.add_argument("--rare-model", default="flux")
     ap.add_argument("--only-model", default="",
                     help="Asolo: fire ONLY this model's subset of each "
                     "workload to one dedicated server (faithful to a "
@@ -248,6 +307,33 @@ def main():
                     help="server-side nvidia-smi sample file (epoch,idx,util)")
     ap.add_argument("--out", default="/tmp/idle_vs_warm.json")
     a = ap.parse_args()
+    if a.frontier:
+        wl = workloads()
+        out = {}
+        for name, arr in wl.items():
+            rare = [t for (t, m, *_ ) in arr if m == a.rare_model]
+            if not rare:
+                continue
+            out[name] = frontier_ttl_sweep(rare, a.s_rare, a.switch_cost)
+        json.dump({"frontier_by_workload": out, "s_rare": a.s_rare,
+                   "switch_cost": a.switch_cost}, open(a.out, "w"), indent=2)
+        print(f"\n#### IDLE-vs-WARMSTART FRONTIER (s_rare={a.s_rare}s "
+              f"c={a.switch_cost}s, optimal TTL≈c={a.switch_cost}s) ####")
+        for name, fr in out.items():
+            sp, dp = fr["shared_pole(ttl=0)"], fr["dedicated_pole(ttl=inf)"]
+            print(f"  [{name}] rare n={fr['n_rare_arrivals']}: "
+                  f"SHARED(ttl0) idle={sp['idle_gpu_s']}s "
+                  f"switch_tax={sp['switch_tax_s']}s ‖ "
+                  f"DEDICATED(ttl∞) idle={dp['idle_gpu_s']}s "
+                  f"switch_tax={dp['switch_tax_s']}s")
+            for pt in fr["frontier"]:
+                print(f"      ttl={pt['ttl_s']}s -> idle={pt['idle_gpu_s']}s "
+                      f"switches={pt['switches']} "
+                      f"switch_tax={pt['switch_tax_s']}s")
+        print(f"REPORT -> {a.out}\nFRONTIER_DONE")
+        return
+    if not a.pole:
+        ap.error("--pole required unless --frontier")
     if a.pole == "A":
         urls = {"sd3": a.sd3_url, "flux": a.flux_url}
     elif a.pole == "Asolo":

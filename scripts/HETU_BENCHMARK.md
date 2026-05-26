@@ -1,4 +1,13 @@
-# Hetu Benchmark — methodology (v2, latency-only)
+# Hetu Benchmark — methodology (v3, 4 pillars)
+
+The 4 pillars: **① industrial load-imbalance workload taxonomy** (Gamma-burst
++ skew + cold-burst + heavy-hog + rate-sweep), **② idle-vs-warmstart frontier
+formalization** (idle_vs_warmstart.py --frontier: idle-timeout-TTL sweep /
+ski-rental; TTL=0 shared pole, TTL=∞ dedicated pole, optimal TTL≈switch-cost),
+**③ quality-elasticity axis** (--mode quality: steps→latency→nRMSE-vs-ref50
+proxy — diffusion's unique step-for-quality lever), **④ authoritative
+per-request decomposition** (/task_timeline: e2e=queue+switch+infer).
+Robustness (no crash/OOM/starvation) is a GATE only, never scored.
 
 A **LATENCY benchmark** for Hetu-DiT as a multimodel serving system
 under **real industrial high-concurrency + load-imbalance traffic**. It

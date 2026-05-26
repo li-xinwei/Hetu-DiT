@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hetu Benchmark v2 — industrial-scenario LATENCY benchmark for the
+"""Hetu Benchmark v3 — industrial-scenario LATENCY benchmark for the
 Hetu-DiT multimodel serving system.  HETU_BENCH_VERSION = 2.
 
 ONE QUESTION
@@ -49,12 +49,18 @@ not per-user probes):
 Basis: DistServe/Clockwork/InferFair/DiffServe/MoDM/BurstGPT/Anyscale/
 NVIDIA (see HETU_BENCHMARK.md). Self-contained (stdlib + requests),
 deterministic (fixed seeds), runnable anytime
-(`bash scripts/run_hetu_benchmark.sh`).  HETU_BENCH_VERSION = 2.
+(`bash scripts/run_hetu_benchmark.sh`).  HETU_BENCH_VERSION = 3.
+
+v3 adds two pillars: (a) QUALITY-ELASTICITY axis (--mode quality:
+steps->latency->quality-proxy), and (b) idle-vs-warmstart FRONTIER
+formalization (scripts/idle_vs_warmstart.py --frontier, TTL-sweep/
+ski-rental). Together with the taxonomy + per-request decomposition =
+the 4 pillars.
 """
 import argparse, json, os, random, threading, time
 import requests
 
-HETU_BENCH_VERSION = 2
+HETU_BENCH_VERSION = 3
 PROMPT = "A futuristic cityscape at golden hour, highly detailed"
 
 SD = ("sd3", 512, 512, 20)
@@ -288,11 +294,87 @@ def run_industrial(base, tag, arr, drain_s, slo_scale):
     return s
 
 
+def _wait_done(base, tid, to=300):
+    """Block until one task completes; return its handle (or None)."""
+    t = time.time()
+    while time.time() - t < to:
+        for h in _get(base, "/task_timeline").get("handles", []):
+            if h["task_id"] == tid and h.get("done_ts") and h.get("ok"):
+                return h
+        time.sleep(1.0)
+    return None
+
+
+def _img_arr(base, tid):
+    """Fetch /image/<tid> PNG -> normalized float array (or None)."""
+    try:
+        import io
+        import numpy as np
+        from PIL import Image
+        r = requests.get(f"{base}/image/{tid}", timeout=20)
+        if r.status_code != 200:
+            return None
+        return np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"),
+                          dtype="float32") / 255.0
+    except Exception:  # noqa: BLE001 — quality proxy is best-effort
+        return None
+
+
+def run_quality(base, slo_scale, steps_list=(50, 30, 20, 10)):
+    """Pillar ③: quality-ELASTICITY axis. Diffusion uniquely lets you
+    trade denoising steps for quality→latency continuously. Per model,
+    fire the SAME (prompt, seed) at each step count; measure the
+    authoritative latency(steps) curve + a quality proxy = normalized
+    RMSE of the image vs the full-step (50) reference (same seed, so
+    structurally comparable; fewer steps ⇒ larger deviation from the
+    converged image). This quantifies the serving lever: under overload,
+    drop steps (graceful quality loss) instead of dropping requests.
+    NOTE: nRMSE-vs-reference is a PROXY for 'distance from full quality',
+    not a perceptual metric — labeled as such.
+    """
+    out = {}
+    for (m, w, h, _st) in (SD, FX):
+        ref_arr, rows = None, []
+        for i, st in enumerate(steps_list):
+            tid = gen(base, m, w, h, st, 7, f"q-{m}-{st}")
+            hd = _wait_done(base, tid)
+            infer = (hd.get("infer_s") if hd else None)
+            e2e = (hd["done_ts"] - hd["submit_ts"]) if hd else None
+            arr = _img_arr(base, tid)
+            if i == 0:
+                ref_arr = arr
+                nrmse = 0.0
+            elif arr is not None and ref_arr is not None \
+                    and arr.shape == ref_arr.shape:
+                import numpy as np
+                nrmse = float(((arr - ref_arr) ** 2).mean() ** 0.5)
+            else:
+                nrmse = None
+            rows.append({"steps": st, "infer_s": round(infer, 3)
+                         if infer else None,
+                         "e2e_s": round(e2e, 3) if e2e else None,
+                         "nrmse_vs_ref50": round(nrmse, 4)
+                         if nrmse is not None else None})
+            print(f"  {m} {w}x{h} steps={st}: infer={infer}s "
+                  f"nrmse_vs_ref={rows[-1]['nrmse_vs_ref50']}", flush=True)
+        # elasticity: latency saved per step dropped (50 -> min steps)
+        full = next((r for r in rows if r["steps"] == steps_list[0]), None)
+        lo = next((r for r in rows if r["steps"] == steps_list[-1]), None)
+        elas = None
+        if full and lo and full["infer_s"] and lo["infer_s"]:
+            ds = steps_list[0] - steps_list[-1]
+            elas = round((full["infer_s"] - lo["infer_s"]) / ds, 4)
+        out[f"{m}_{w}x{h}"] = {"curve": rows,
+                               "latency_s_per_step": elas}
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--mode", default="all",
-                    choices=["industrial", "sweep", "refpoints", "all"])
+                    choices=["industrial", "sweep", "refpoints", "quality",
+                             "all"])
     ap.add_argument("--out-dir", default="/tmp/hetu_bench")
     ap.add_argument("--drain-s", type=float, default=200.0)
     ap.add_argument("--slo-scale", type=float, default=1.0)
@@ -365,6 +447,11 @@ def main():
             print(f"  >> {name}: switching cost +{delta}s e2e p95 vs "
                   f"same-model baseline", flush=True)
         rep["refpoints"] = rp
+
+    if a.mode in ("quality", "all"):
+        print("\n=== quality-elasticity (steps -> latency, quality) ===",
+              flush=True)
+        rep["quality_elasticity"] = run_quality(a.base_url, a.slo_scale)
 
     # LATENCY score (robustness only a gate). De-saturated (§8.46): the
     # SLO-attainment term is the mean over the HARD operating points —
